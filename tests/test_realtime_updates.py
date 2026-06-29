@@ -27,6 +27,8 @@ class RealtimeUpdatesTests(unittest.TestCase):
         database.init_db()
         with server._realtime_lock:
             server._realtime_subscribers.clear()
+        with server._presence_lock:
+            server._live_presence.clear()
 
         self.date = today_str()
         options = json.dumps([
@@ -49,6 +51,8 @@ class RealtimeUpdatesTests(unittest.TestCase):
     def tearDown(self):
         with server._realtime_lock:
             server._realtime_subscribers.clear()
+        with server._presence_lock:
+            server._live_presence.clear()
         if database._conn is not None:
             database._conn.close()
         database._conn = None
@@ -69,7 +73,7 @@ class RealtimeUpdatesTests(unittest.TestCase):
             config.WEBAPP_SECRET,
         )
 
-    def _record_attempt(self, user_id, guessed_id=None):
+    def _record_attempt(self, user_id, guessed_id=None, mode=database.MODE_AUTHOR):
         guessed_id = self.CORRECT_ID if guessed_id is None else guessed_id
         is_correct = guessed_id == self.CORRECT_ID
         name = f"Joueur {user_id}"
@@ -82,24 +86,30 @@ class RealtimeUpdatesTests(unittest.TestCase):
             guessed_id,
             is_correct,
             time_taken_ms=1200,
+            mode=mode,
         ))
         database.update_streak(
-            self.GUILD_ID, user_id, self.date, is_correct
+            self.GUILD_ID, user_id, self.date, is_correct, mode=mode
         )
         database.record_answer(
-            self.GUILD_ID, user_id, name, is_correct
+            self.GUILD_ID, user_id, name, is_correct, mode=mode
         )
 
-    def test_state_and_stream_are_locked_until_viewer_has_played(self):
+    def test_state_before_answer_only_exposes_spoiler_safe_progress(self):
+        self._record_attempt(20)
         token = self._token(10)
         with self.app.test_client() as client:
             state = client.get(f"/.proxy/daily/state?t={token}")
-            stream = client.get(f"/.proxy/daily/stream?t={token}")
 
-        self.assertEqual(state.status_code, 403)
-        self.assertEqual(state.get_json()["error"], "answer_required")
-        self.assertEqual(stream.status_code, 403)
-        self.assertEqual(stream.get_json()["error"], "answer_required")
+        self.assertEqual(state.status_code, 200)
+        data = state.get_json()
+        self.assertFalse(data["unlocked"])
+        self.assertEqual(data["results"], [])
+        self.assertEqual(data["leaderboard"], [])
+        other = next(p for p in data["progress"] if p["user_id"] == "20")
+        self.assertEqual(other["statuses"][database.MODE_AUTHOR], "complete")
+        self.assertNotIn("guessed_id", json.dumps(data))
+        self.assertNotIn("correct_id", json.dumps(data))
 
     def test_state_contains_personalized_results_and_leaderboard(self):
         self._record_attempt(10)
@@ -111,14 +121,87 @@ class RealtimeUpdatesTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers["Cache-Control"], "no-store")
         data = response.get_json()
+        self.assertTrue(data["unlocked"])
         self.assertEqual(len(data["results"]), 1)
         self.assertEqual(data["results"][0]["user_name"], "Joueur 10")
         self.assertTrue(data["leaderboard"][0]["is_me"])
 
+    def test_result_is_revealed_after_viewer_completes_the_same_mode(self):
+        self._record_attempt(20, self.WRONG_ID)
+        self._record_attempt(10)
+
+        with self.app.test_client() as client:
+            response = client.get(
+                f"/.proxy/daily/state?t={self._token(10)}"
+            )
+
+        other = next(
+            player
+            for player in response.get_json()["progress"]
+            if player["user_id"] == "20"
+        )
+        self.assertEqual(other["statuses"][database.MODE_AUTHOR], "fail")
+
+    def test_spoiler_rule_is_applied_independently_for_each_mode(self):
+        self._record_attempt(20)
+        self._record_attempt(20, mode=database.MODE_PHRASE)
+        self._record_attempt(10)
+
+        progress = server._daily_progress_view(
+            self.GUILD_ID,
+            self.date,
+            10,
+        )
+        other = next(player for player in progress if player["user_id"] == "20")
+
+        self.assertEqual(other["statuses"][database.MODE_AUTHOR], "win")
+        self.assertEqual(other["statuses"][database.MODE_PHRASE], "complete")
+
+    def test_start_marks_player_as_playing(self):
+        with self.app.test_client() as client:
+            start = client.post(
+                "/daily/start",
+                json={"token": self._token(10), "difficulty": "normal"},
+            )
+            state = client.get(
+                f"/.proxy/daily/state?t={self._token(20)}"
+            )
+
+        self.assertEqual(start.status_code, 200)
+        player = next(
+            item
+            for item in state.get_json()["progress"]
+            if item["user_id"] == "10"
+        )
+        self.assertTrue(player["playing"])
+        self.assertEqual(
+            player["statuses"][database.MODE_AUTHOR],
+            "playing",
+        )
+
+    def test_stale_presence_expires(self):
+        server._touch_presence(
+            self.GUILD_ID,
+            self.date,
+            10,
+            database.MODE_AUTHOR,
+        )
+        with server._presence_lock:
+            presence = server._live_presence[(self.GUILD_ID, self.date, 10)]
+            presence["seen_at"] -= server._PRESENCE_TTL_SECONDS + 1
+
+        progress = server._daily_progress_view(
+            self.GUILD_ID,
+            self.date,
+            20,
+        )
+
+        self.assertFalse(any(player["user_id"] == "10" for player in progress))
+
     def test_stream_receives_update_and_unsubscribes_on_close(self):
         self._record_attempt(10)
         token = self._token(10)
-        key = (self.GUILD_ID, self.date, database.MODE_AUTHOR)
+        key = (self.GUILD_ID, self.date)
 
         with self.app.test_client() as client:
             response = client.get(
@@ -139,20 +222,17 @@ class RealtimeUpdatesTests(unittest.TestCase):
 
         self.assertNotIn(key, server._realtime_subscribers)
 
-    def test_publish_is_isolated_by_mode(self):
-        author_key = (self.GUILD_ID, self.date, database.MODE_AUTHOR)
-        media_key = (self.GUILD_ID, self.date, database.MODE_MEDIA)
-        subscriber = server._subscribe_realtime(author_key)
+    def test_publish_is_shared_across_all_daily_modes(self):
+        key = (self.GUILD_ID, self.date)
+        subscriber = server._subscribe_realtime(key)
         try:
-            server._publish_realtime(media_key)
-            self.assertTrue(subscriber.empty())
-            server._publish_realtime(author_key)
+            server._publish_realtime(key)
             self.assertIsNone(subscriber.get_nowait())
         finally:
-            server._unsubscribe_realtime(author_key, subscriber)
+            server._unsubscribe_realtime(key, subscriber)
 
     def test_answer_endpoint_publishes_an_update(self):
-        key = (self.GUILD_ID, self.date, database.MODE_AUTHOR)
+        key = (self.GUILD_ID, self.date)
         subscriber = server._subscribe_realtime(key)
         try:
             with self.app.test_client() as client:

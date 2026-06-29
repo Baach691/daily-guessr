@@ -1,6 +1,6 @@
 # Daily Guessr - public repository status
 
-Last updated: June 27, 2026.
+Last updated: June 29, 2026.
 
 ## Public scope
 
@@ -10,6 +10,7 @@ This repository contains the reusable source code for:
 - the Flask web game and administration tools;
 - the Discord Activity client and OAuth session bridge;
 - real-time result updates with an automatic polling fallback;
+- spoiler-safe progress tracking across all three modes;
 - automated tests and generic configuration examples.
 
 ## Privacy boundary
@@ -31,10 +32,14 @@ All tests and examples must use clearly fictional identities and identifiers.
 - [x] Discord Activity client and backend bridge added.
 - [x] `/daily` can launch the configured Discord Activity.
 - [x] Admin corrections and real-time leaderboard updates included.
+- [x] Live presence, three-mode progress and server-side anti-spoiler rules.
+- [x] Three-panel responsive layout and corrected leaderboard alignment.
+- [x] Video duration added to the Hardcore media timer.
+- [x] Rich Presence artwork keys `1` and `2`.
 - [x] `TERMS.md` and `PRIVACY.md` added.
 - [x] VPS-specific deployment files removed.
 - [x] Final working-tree secret and identity scan.
-- [x] Python tests and Activity build verification.
+- [x] 21 Python tests, syntax checks and Activity build verification.
 - [x] Publish the sanitized root commit.
 
 ## External setup still required

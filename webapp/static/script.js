@@ -12,8 +12,8 @@
   const streakLabel = document.getElementById("streak-label");
   const statsBest = document.getElementById("best");
   const statsToday = document.getElementById("today-count");
-  const playerList = document.getElementById("player-list");
-  const playersHeader = document.querySelector(".players h3 .count");
+  const liveList = document.getElementById("live-list");
+  const liveSummary = document.getElementById("live-summary");
   const timerEl = document.getElementById("timer");
   const contextSection = document.getElementById("context");
   const contextList = document.getElementById("context-list");
@@ -72,7 +72,8 @@
     return "🧊";
   }
 
-  const hardcoreMs = window.DAILY?.hardcoreMs || 10000;
+  const hardcoreBaseMs = window.DAILY?.hardcoreBaseMs || 10000;
+  let hardcoreLimitMs = window.DAILY?.hardcoreMs || hardcoreBaseMs;
 
   function updateTimer() {
     elapsedMs = startMs == null ? 0 : Date.now() - startMs;
@@ -81,7 +82,7 @@
 
     // Hardcore : compte à rebours. À 0 → défaite automatique (une seule fois).
     if (difficulty === "hardcore" && !locked) {
-      const remaining = Math.max(0, hardcoreMs - elapsedMs);
+      const remaining = Math.max(0, hardcoreLimitMs - elapsedMs);
       timerEl.textContent = `⏱ ${(remaining / 1000).toFixed(2)}s`;
       timerEl.classList.toggle("danger", remaining <= 3000);
       if (remaining <= 0 && !answering) {
@@ -107,14 +108,27 @@
   let reconnectWatchdog = null;
   let pollTimer = null;
   let pollInFlight = false;
+  let presenceTimer = null;
 
   function applyRealtimeState(data) {
-    if (!data || !Array.isArray(data.results) || !Array.isArray(data.leaderboard)) {
+    if (!data || !Array.isArray(data.progress)) {
       return;
     }
-    repaintPlayers(data.results);
-    repaintLeaderboard(data.leaderboard);
-    if (statsToday) statsToday.textContent = data.results.length;
+    repaintLiveProgress(data.progress);
+    if (
+      data.unlocked
+      && Array.isArray(data.results)
+      && Array.isArray(data.leaderboard)
+    ) {
+      repaintLeaderboard(data.leaderboard);
+    }
+    if (statsToday) statsToday.textContent = data.participant_count ?? data.progress.length;
+    if (liveSummary) {
+      const activeCount = data.progress.filter((player) => player.active).length;
+      liveSummary.textContent = activeCount
+        ? `${activeCount} joueur${activeCount > 1 ? "s" : ""} actif${activeCount > 1 ? "s" : ""} maintenant`
+        : "Progression du daily, sans dévoiler les réponses";
+    }
   }
 
   function clearStreamTimers() {
@@ -224,6 +238,29 @@
       clearTimeout(pollTimer);
       pollTimer = null;
     }
+    if (presenceTimer) {
+      clearInterval(presenceTimer);
+      presenceTimer = null;
+    }
+  }
+
+  async function heartbeatPresence() {
+    if (realtimeStopped || document.hidden || !token) return;
+    try {
+      await fetch("/.proxy/daily/presence", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token }),
+        cache: "no-store",
+      });
+    } catch (e) {
+      /* La prochaine pulsation retentera sans interrompre le jeu. */
+    }
+  }
+
+  function startPresence() {
+    heartbeatPresence();
+    presenceTimer = setInterval(heartbeatPresence, 15000);
   }
 
   document.addEventListener("visibilitychange", () => {
@@ -234,6 +271,7 @@
         pollTimer = null;
       }
     } else {
+      heartbeatPresence();
       pollRealtimeState();
     }
   });
@@ -246,9 +284,11 @@
     serverRevealBtn.addEventListener("click", () => revealHardcoreOptions(null));
   }
 
+  startRealtime();
+  startPresence();
+
   // --- Si déjà joué au chargement : on charge directement le contexte. -----
   if (alreadyPlayed) {
-    startRealtime();
     loadContext();
     return;
   }
@@ -293,15 +333,33 @@
     if (gameStarted) return;
     gameStarted = true;
 
+    const mediaDurationMs = difficulty === "hardcore"
+      ? await getMediaDurationMs()
+      : 0;
+    if (
+      difficulty === "hardcore"
+      && window.DAILY?.isMedia
+      && window.DAILY?.mediaIsVideo
+    ) {
+      hardcoreLimitMs = hardcoreBaseMs + mediaDurationMs;
+    }
+
     // Verrouille la difficulté côté serveur ; on respecte la valeur effective.
     try {
       const res = await fetch("/daily/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ token, difficulty }),
+        body: JSON.stringify({
+          token,
+          difficulty,
+          media_duration_ms: mediaDurationMs,
+        }),
       });
       const d = await res.json();
       if (res.ok && d.difficulty) difficulty = d.difficulty;
+      if (res.ok && Number.isFinite(d.hardcore_limit_ms)) {
+        hardcoreLimitMs = d.hardcore_limit_ms;
+      }
     } catch (e) {
       /* en cas d'échec réseau on continue dans la difficulté locale */
     }
@@ -310,6 +368,12 @@
     elapsedMs = 0;
     if (startCard) startCard.hidden = true;
     if (messageCard) messageCard.hidden = false;
+    const dailyVideo = document.getElementById("daily-media");
+    if (dailyVideo instanceof HTMLVideoElement) {
+      dailyVideo.play().catch(() => {
+        /* Certains clients Discord exigent un clic direct sur la vidéo. */
+      });
+    }
 
     if (difficulty === "hardcore") {
       setupHardcore();
@@ -330,6 +394,33 @@
     updateTimer();
     // ~21 fps : assez fluide pour voir défiler les centièmes sans surcharger.
     tickInterval = setInterval(updateTimer, 47);
+  }
+
+  async function getMediaDurationMs() {
+    if (!window.DAILY?.isMedia || !window.DAILY?.mediaIsVideo) return 0;
+    const video = document.getElementById("daily-media");
+    if (!(video instanceof HTMLVideoElement)) return 0;
+
+    const durationMs = () => (
+      Number.isFinite(video.duration) && video.duration > 0
+        ? Math.round(video.duration * 1000)
+        : 0
+    );
+    if (durationMs()) return durationMs();
+
+    video.load();
+    await new Promise((resolve) => {
+      const done = () => {
+        clearTimeout(timeout);
+        video.removeEventListener("loadedmetadata", done);
+        video.removeEventListener("error", done);
+        resolve();
+      };
+      const timeout = setTimeout(done, 8000);
+      video.addEventListener("loadedmetadata", done, { once: true });
+      video.addEventListener("error", done, { once: true });
+    });
+    return durationMs();
   }
 
   async function loadOptions() {
@@ -412,8 +503,8 @@
     paintButtons(clickedBtn, data);
     paintDistribution(data);
     animateStats(data);
-    repaintPlayers(data.results);
     repaintLeaderboard(data.leaderboard);
+    repaintLiveProgress(data.progress || []);
     startRealtime();
     showResult(data);
     setupRevealForHardcore(data);
@@ -651,7 +742,49 @@
     if (hcSection) hcSection.hidden = true;
   }
 
-  // --- Sidebar : classement live -------------------------------------------
+  // --- Panneau droit : progression des trois modes -------------------------
+  function repaintLiveProgress(players) {
+    if (!liveList || !Array.isArray(players)) return;
+    if (!players.length) {
+      liveList.innerHTML = '<li class="live-empty">Personne n’a encore ouvert le daily.</li>';
+      return;
+    }
+
+    const modes = ["author", "phrase", "media"];
+    const statusView = {
+      win: { symbol: "✓", label: "Réussi" },
+      fail: { symbol: "×", label: "Raté" },
+      playing: { symbol: "⌛", label: "En cours" },
+      complete: { symbol: "✓", label: "Terminé, résultat masqué" },
+      waiting: { symbol: "—", label: "Pas commencé" },
+    };
+    liveList.innerHTML = players
+      .map((player) => {
+        const statuses = modes
+          .map((mode) => {
+            const key = statusView[player.statuses?.[mode]]
+              ? player.statuses[mode]
+              : "waiting";
+            const status = statusView[key];
+            return `<span class="live-status ${key}" title="${status.label}" aria-label="${status.label}">${status.symbol}</span>`;
+          })
+          .join("");
+        return `
+          <li class="live-player${player.active ? " active" : ""}${player.playing ? " playing" : ""}${player.is_me ? " me" : ""}">
+            <div class="live-identity">
+              <img class="live-avatar" src="${escapeAttr(player.avatar_url || "")}" alt="" loading="lazy">
+              <div>
+                <div class="live-name">${escapeHtml(player.name)}${player.is_me ? " · Toi" : ""}</div>
+                <div class="live-activity">${escapeHtml(player.activity || "")}</div>
+              </div>
+            </div>
+            ${statuses}
+          </li>`;
+      })
+      .join("");
+  }
+
+  // --- Panneau gauche : classement du mode courant -------------------------
   function repaintLeaderboard(leaderboard) {
     const list = document.getElementById("lb-list");
     if (!list || !Array.isArray(leaderboard)) return;
@@ -812,7 +945,7 @@
   function animateStats(data) {
     statsStreak.textContent = data.current_streak;
     statsBest.textContent = data.best_streak;
-    statsToday.textContent = data.stats.total;
+    statsToday.textContent = data.participant_count ?? data.stats.total;
     if (streakLabel) {
       streakLabel.textContent = `${streakEmoji(data.current_streak)} Streak`;
     }
@@ -821,41 +954,6 @@
       void el.offsetWidth;
       el.style.animation = "pop 0.35s ease-out";
     });
-  }
-
-  function repaintPlayers(results) {
-    if (!playerList) return;
-    // On ne révèle la liste des joueurs qu'après avoir joué (anti-spoil / moins relou).
-    const playersSection = document.getElementById("players");
-    if (playersSection) playersSection.hidden = false;
-    if (playersHeader) {
-      const correct = results.filter((r) => r.correct).length;
-      playersHeader.textContent = `(${correct} ✅ / ${results.length})`;
-    }
-    if (!results.length) {
-      playerList.innerHTML = '<li class="player empty">Personne n\'a encore tenté aujourd\'hui.</li>';
-      return;
-    }
-    playerList.innerHTML = results
-      .map(
-        (r) => `
-          <li class="player ${r.correct ? "win" : "lose"}">
-            <img class="avatar" src="${escapeAttr(r.avatar_url)}" alt="" loading="lazy">
-            <span class="name">${escapeHtml(r.user_name)}</span>
-            ${r.difficulty === "hardcore" ? `<span class="diff-badge" title="Mode Hardcore">💀</span>` : ""}
-            ${guessBadge(r)}
-            ${r.time_taken_str ? `<span class="time-badge">${escapeHtml(r.time_taken_str)}</span>` : ""}
-            <span class="status">${r.correct ? "✅" : "❌"}</span>
-          </li>`,
-      )
-      .join("");
-  }
-
-  function guessBadge(r) {
-    // Ce que le joueur a répondu (mauvaises réponses uniquement) : le nom complet
-    // de la personne devinée. Site uniquement.
-    if (!r.guess_label) return "";
-    return `<span class="guess-badge guess-name" title="Sa réponse">${escapeHtml(r.guess_label)}</span>`;
   }
 
   function showResult(data) {

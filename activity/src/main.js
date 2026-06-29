@@ -28,7 +28,7 @@ async function main() {
     response_type: 'code',
     state: '',
     prompt: 'none',
-    scope: ['identify', 'guilds'],
+    scope: ['identify', 'guilds', 'rpc.activities.write'],
   });
 
   // 3) Échange le code contre un access_token (côté serveur, secret protégé).
@@ -48,6 +48,30 @@ async function main() {
   // 4) Authentifie la session dans l'iframe → on obtient l'utilisateur.
   const auth = await sdk.commands.authenticate({ access_token });
   if (!auth || !auth.user) throw new Error('authenticate a échoué');
+
+  // Les clés "1" et "2" correspondent aux images téléversées dans
+  // Developer Portal > Rich Presence > Art Assets.
+  try {
+    await sdk.commands.setActivity({
+      activity: {
+        type: 0,
+        details: 'Daily en cours',
+        state: 'Trois modes à compléter',
+        assets: {
+          large_image: '1',
+          large_text: 'Daily Guessr',
+          small_image: '2',
+          small_text: 'Un essai par mode',
+        },
+        timestamps: {
+          start: Math.floor(Date.now() / 1000),
+        },
+      },
+    });
+  } catch (error) {
+    // La Rich Presence est décorative : son échec ne doit pas bloquer le jeu.
+    console.warn('Impossible de mettre à jour la Rich Presence', error);
+  }
 
   if (!sdk.guildId) {
     throw new Error("Lance l'Activity depuis un serveur Discord, pas depuis un message privé.");

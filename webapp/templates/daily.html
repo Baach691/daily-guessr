@@ -77,7 +77,12 @@
           <p class="diff-explain" id="diff-explain">
             <strong>Hardcore</strong> : aucune proposition affichée. Tu tapes toi-même
             le pseudo dans une barre de recherche, et tu n'as que
-            <strong>{{ hardcore_seconds }} secondes</strong> ⏱ (au-delà = perdu).
+            {% if is_media and media_is_video %}
+              <strong>la durée de la vidéo + {{ hardcore_seconds }} secondes</strong>
+            {% else %}
+              <strong>{{ hardcore_seconds }} secondes</strong>
+            {% endif %}
+            ⏱ (au-delà = perdu).
             Plus dur, mais ça vaut <strong>2 points</strong> (Normal : 1 point).
           </p>
           {% if locked_difficulty %}
@@ -209,44 +214,17 @@
       </div>
     </section>
 
-    <section class="players" id="players" {% if not attempt %}hidden{% endif %}>
-      <h3>📋 Tentatives d'aujourd'hui <span class="count">{% if attempt %}({{ correct_count }} ✅ / {{ total_count }}){% endif %}</span></h3>
-      <ul class="player-list" id="player-list">
-        {# On ne rend la liste côté serveur que si le joueur a déjà joué.
-           Sinon elle reste vide (pas de noms dans le DOM) et sera remplie
-           par le JS après la réponse. #}
-        {% if attempt %}
-          {% for r in results %}
-            <li class="player {{ 'win' if r.correct else 'lose' }}">
-              <img class="avatar" src="{{ r.avatar_url }}" alt="" loading="lazy">
-              <span class="name">{{ r.user_name }}</span>
-              {% if r.difficulty == 'hardcore' %}
-                <span class="diff-badge" title="Mode Hardcore">💀</span>
-              {% endif %}
-              {% if r.guess_label %}
-                <span class="guess-badge guess-name" title="Sa réponse">{{ r.guess_label }}</span>
-              {% endif %}
-              {% if r.time_taken_str %}
-                <span class="time-badge">{{ r.time_taken_str }}</span>
-              {% endif %}
-              <span class="status">{{ '✅' if r.correct else '❌' }}</span>
-            </li>
-          {% endfor %}
-          {% if not results %}
-            <li class="player empty">Personne n'a encore tenté aujourd'hui.</li>
-          {% endif %}
-        {% endif %}
-      </ul>
-    </section>
-
     <footer class="footer">
       <span>Un seul essai par mode et par jour · Tu reviens demain ?</span>
       <a class="back" href="discord://">Retour à Discord</a>
     </footer>
   </main>
 
-  <aside class="sidebar" id="sidebar">
-    <h3 class="sidebar-title">🏆 Classement</h3>
+  <aside class="sidebar ranking-sidebar" id="sidebar">
+    <div class="sidebar-heading">
+      <h2>Classement</h2>
+      <p>{{ page_title }}</p>
+    </div>
     <ol class="lb-list" id="lb-list">
       {# Anti-triche : classement masqué tant qu'on n'a pas joué (les streaks
          laissent deviner si le défi est piégeux). Rempli par le JS après réponse. #}
@@ -273,6 +251,28 @@
       {% endif %}
     </ol>
   </aside>
+
+  <aside class="sidebar live-sidebar" id="live-sidebar">
+    <div class="sidebar-heading live-heading">
+      <h2><span class="live-dot" aria-hidden="true"></span>En direct</h2>
+      <p id="live-summary" aria-live="polite">Progression du daily, sans dévoiler les réponses</p>
+    </div>
+    <div class="live-columns" aria-hidden="true">
+      <span>Joueur</span>
+      <span title="Qui a écrit ça ?">🌞</span>
+      <span title="Devine la phrase">✍️</span>
+      <span title="Devine le média">🖼️</span>
+    </div>
+    <ul class="live-list" id="live-list">
+      <li class="live-empty">Connexion au suivi en direct…</li>
+    </ul>
+    <div class="live-legend">
+      <span><b class="legend-status win">✓</b> Réussi</span>
+      <span><b class="legend-status fail">×</b> Raté</span>
+      <span><b class="legend-status playing">⌛</b> En cours</span>
+      <span><b class="legend-status complete">✓</b> Résultat masqué</span>
+    </div>
+  </aside>
   </div>
 
   <script>
@@ -283,7 +283,8 @@
       subjectName: {{ (subject_name or '') | tojson }},
       hardcoreEnabled: {{ 'true' if hardcore_enabled else 'false' }},
       lockedDifficulty: {{ (locked_difficulty or '') | tojson }},
-      hardcoreMs: {{ (hardcore_seconds or 10) * 1000 }},
+      hardcoreBaseMs: {{ (hardcore_seconds or 10) * 1000 }},
+      hardcoreMs: {{ hardcore_limit_ms }},
       isMedia: {{ 'true' if is_media else 'false' }},
       mediaUrl: {{ (media_url or '') | tojson }},
       mediaIsVideo: {{ 'true' if media_is_video else 'false' }},

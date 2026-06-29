@@ -10,9 +10,11 @@ Les liens sont signés HMAC : impossible de tricher sur l'identité.
 import asyncio
 import json
 import logging
+import math
 import os
 import queue
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -41,9 +43,20 @@ from cogs.daily import (
 
 log = logging.getLogger(__name__)
 
-RealtimeKey = Tuple[int, str, str]
+RealtimeKey = Tuple[int, str]
+PresenceKey = Tuple[int, str, int]
 _realtime_subscribers: Dict[RealtimeKey, Set[queue.Queue]] = {}
 _realtime_lock = threading.Lock()
+_live_presence: Dict[PresenceKey, dict] = {}
+_presence_lock = threading.Lock()
+_PRESENCE_TTL_SECONDS = 45
+_MAX_MEDIA_HARDCORE_BONUS_SECONDS = 10 * 60
+
+DAILY_MODE_SPECS = (
+    (database.MODE_AUTHOR, "🌞", "Qui a écrit ça ?"),
+    (database.MODE_PHRASE, "✍️", "Devine la phrase"),
+    (database.MODE_MEDIA, "🖼️", "Devine le média"),
+)
 
 
 def _subscribe_realtime(key: RealtimeKey) -> queue.Queue:
@@ -74,6 +87,58 @@ def _publish_realtime(key: RealtimeKey) -> None:
             subscriber.put_nowait(None)
         except queue.Full:
             pass
+
+
+def _touch_presence(
+    guild_id: int,
+    date_str: str,
+    user_id: int,
+    mode: str,
+    playing: Optional[bool] = None,
+) -> bool:
+    """Marque un joueur présent et renvoie True si son état visible a changé."""
+    key = (guild_id, date_str, user_id)
+    now = time.monotonic()
+    with _presence_lock:
+        previous = _live_presence.get(key)
+        effective_playing = (
+            bool(playing)
+            if playing is not None
+            else bool(previous and previous.get("playing"))
+        )
+        changed = (
+            previous is None
+            or previous["mode"] != mode
+            or previous.get("playing", False) != effective_playing
+        )
+        _live_presence[key] = {
+            "mode": mode,
+            "playing": effective_playing,
+            "seen_at": now,
+        }
+    return changed
+
+
+def _active_presence(guild_id: int, date_str: str) -> Dict[int, dict]:
+    """Renvoie les présences récentes en supprimant les heartbeats expirés."""
+    now = time.monotonic()
+    active = {}
+    with _presence_lock:
+        expired = [
+            key
+            for key, presence in _live_presence.items()
+            if now - presence["seen_at"] > _PRESENCE_TTL_SECONDS
+        ]
+        for key in expired:
+            _live_presence.pop(key, None)
+        for (
+            presence_guild,
+            presence_date,
+            user_id,
+        ), presence in _live_presence.items():
+            if presence_guild == guild_id and presence_date == date_str:
+                active[user_id] = dict(presence)
+    return active
 
 
 def default_avatar(user_id: int) -> str:
@@ -370,14 +435,133 @@ def _attach_guess_labels(guild_id: int, options: list, results: list) -> list:
     return results
 
 
+def _daily_progress_view(
+    guild_id: int,
+    date_str: str,
+    viewer_user_id: int,
+) -> list:
+    """Progression des participants, personnalisée pour éviter tout spoil.
+
+    Le résultat d'un mode n'est révélé que si le viewer a lui-même terminé ce
+    mode. Avant cela, un résultat achevé est signalé sans indiquer victoire ou
+    défaite. Aucun choix ni contenu de réponse n'entre dans ce payload.
+    """
+    presence = _active_presence(guild_id, date_str)
+    attempts_by_mode = {}
+    participants = {}
+
+    for mode, _icon, _label in DAILY_MODE_SPECS:
+        mode_attempts = {}
+        for attempt in database.get_daily_results(guild_id, date_str, mode=mode):
+            user_id = int(attempt["user_id"])
+            mode_attempts[user_id] = attempt
+            participants.setdefault(user_id, {
+                "user_id": user_id,
+                "name": attempt["user_name"],
+            })
+        attempts_by_mode[mode] = mode_attempts
+
+    for user_id in presence:
+        user = database.get_user(guild_id, user_id) or {}
+        participants.setdefault(user_id, {
+            "user_id": user_id,
+            "name": user.get("name") or "Joueur",
+        })
+
+    viewer_completed = {
+        mode
+        for mode, attempts in attempts_by_mode.items()
+        if viewer_user_id in attempts
+    }
+    mode_labels = {mode: label for mode, _icon, label in DAILY_MODE_SPECS}
+    out = []
+
+    for user_id, participant in participants.items():
+        active = presence.get(user_id)
+        statuses = {}
+        completed_count = 0
+        playing_mode = None
+
+        for mode, _icon, _label in DAILY_MODE_SPECS:
+            attempt = attempts_by_mode[mode].get(user_id)
+            if attempt is not None:
+                completed_count += 1
+                if mode in viewer_completed or user_id == viewer_user_id:
+                    statuses[mode] = "win" if attempt["correct"] else "fail"
+                else:
+                    statuses[mode] = "complete"
+                continue
+
+            is_current_mode = active is not None and active["mode"] == mode
+            if is_current_mode and active.get("playing", False):
+                statuses[mode] = "playing"
+                playing_mode = mode
+            else:
+                statuses[mode] = "waiting"
+
+        if playing_mode:
+            activity = f"{mode_labels[playing_mode]} en cours"
+        elif active and user_id in attempts_by_mode[active["mode"]]:
+            activity = (
+                "Daily terminé"
+                if completed_count == len(DAILY_MODE_SPECS)
+                else f"{mode_labels[active['mode']]} terminé"
+            )
+        elif active:
+            activity = f"Sur {mode_labels[active['mode']]}"
+        elif completed_count == len(DAILY_MODE_SPECS):
+            activity = "Daily terminé"
+        elif completed_count:
+            plural = "s" if completed_count > 1 else ""
+            activity = f"{completed_count} mode{plural} terminé{plural}"
+        else:
+            activity = "Daily ouvert"
+
+        user = database.get_user(guild_id, user_id) or {}
+        out.append({
+            "user_id": str(user_id),
+            "name": user.get("name") or participant["name"],
+            "avatar_url": user.get("avatar_url") or default_avatar(user_id),
+            "active": active is not None,
+            "playing": playing_mode is not None,
+            "activity": activity,
+            "statuses": statuses,
+            "is_me": user_id == viewer_user_id,
+            "_completed_count": completed_count,
+        })
+
+    out.sort(key=lambda player: (
+        not player["playing"],
+        not player["active"],
+        -player["_completed_count"],
+        player["name"].casefold(),
+    ))
+    for player in out:
+        player.pop("_completed_count", None)
+    return out
+
+
 def _realtime_state(
     guild_id: int,
     date_str: str,
     mode: str,
     user_id: int,
-    challenge: dict,
+    challenge: Optional[dict],
 ) -> dict:
-    """État public après réponse, commun à SSE, polling et POST /answer."""
+    """État live personnalisé, commun à SSE, polling et POST /answer."""
+    progress = _daily_progress_view(guild_id, date_str, user_id)
+    has_attempt = database.get_daily_attempt(
+        guild_id, date_str, user_id, mode=mode
+    ) is not None
+    if not has_attempt or challenge is None:
+        return {
+            "unlocked": False,
+            "results": [],
+            "leaderboard": [],
+            "progress": progress,
+            "participant_count": len(progress),
+        }
+
     results = _enrich_results(
         database.get_daily_results(guild_id, date_str, mode=mode)
     )
@@ -395,8 +579,11 @@ def _realtime_state(
         for result in results
     ]
     return {
+        "unlocked": True,
         "results": results_view,
         "leaderboard": _leaderboard_view(guild_id, mode, user_id),
+        "progress": progress,
+        "participant_count": len(progress),
     }
 
 
@@ -429,13 +616,8 @@ def _mode_tabs(
     activity: bool = False,
 ) -> list:
     """Onglets de navigation entre les trois modes du daily."""
-    specs = (
-        (database.MODE_AUTHOR, "🌞", "Qui a écrit ça ?"),
-        (database.MODE_PHRASE, "✍️", "Devine la phrase"),
-        (database.MODE_MEDIA, "🖼️", "Devine le média"),
-    )
     tabs = []
-    for mode, icon, label in specs:
+    for mode, icon, label in DAILY_MODE_SPECS:
         available = _load_challenge(guild_id, today, mode) is not None
         tabs.append({
             "mode": mode,
@@ -766,18 +948,30 @@ def create_app(bot=None) -> Flask:
         current_streak, best_streak = database.get_streak(
             guild_id, user_id, today_str=today, mode=mode
         )
-        results = _enrich_results(database.get_daily_results(guild_id, today, mode=mode))
-        _attach_guess_labels(guild_id, ch["options"], results)
-        correct_count = sum(1 for r in results if r["correct"])
+        results = database.get_daily_results(guild_id, today, mode=mode)
 
         # Hardcore : disponible sur "Qui a écrit ça ?" ET "Devine le média" (réponse =
         # un auteur dans les deux cas). Verrou de difficulté (par mode) une fois
         # "Jouer" cliqué (sinon le joueur reste libre de choisir).
         hardcore_enabled = mode in (database.MODE_AUTHOR, database.MODE_MEDIA)
-        locked_difficulty = (
-            database.get_daily_difficulty(guild_id, today, user_id, mode)
-            if hardcore_enabled else None
+        stored_difficulty = database.get_daily_difficulty(
+            guild_id, today, user_id, mode
         )
+        locked_difficulty = stored_difficulty if hardcore_enabled else None
+        hardcore_limit_ms = int(round(1000 * (
+            config.HARDCORE_TIME_LIMIT
+            + database.get_daily_time_bonus_seconds(
+                guild_id, today, user_id, mode
+            )
+        )))
+        if _touch_presence(
+            guild_id,
+            today,
+            user_id,
+            mode,
+            playing=attempt is None and stored_difficulty is not None,
+        ):
+            _publish_realtime((guild_id, today))
 
         # Options + (si déjà joué) le % de joueurs ayant choisi chacune (reveal).
         options_view = _options_view(guild_id, ch["options"], mode)
@@ -802,6 +996,7 @@ def create_app(bot=None) -> Flask:
             page_title=_titles.get(mode, "Qui a écrit ça ?"),
             hardcore_enabled=hardcore_enabled,
             hardcore_seconds=config.HARDCORE_TIME_LIMIT,
+            hardcore_limit_ms=hardcore_limit_ms,
             locked_difficulty=locked_difficulty,
             subject_name=ch["subject_name"],
             subject_avatar_url=ch["subject_avatar_url"],
@@ -814,8 +1009,6 @@ def create_app(bot=None) -> Flask:
             attempt=attempt,
             current_streak=current_streak,
             best_streak=best_streak,
-            results=results,
-            correct_count=correct_count,
             total_count=len(results),
             # Anti-triche : tant que le joueur n'a pas joué, on ne lui livre NI le
             # classement live NI le compteur (les streaks/le nombre de joueurs
@@ -1066,11 +1259,11 @@ def create_app(bot=None) -> Flask:
             result["guessed_id"],
             result["correct"],
         )
-        _publish_realtime((guild_id, date_str, mode))
+        _publish_realtime((guild_id, date_str))
         return jsonify(result)
 
     def _realtime_viewer(token: str):
-        """Valide un viewer et applique le verrou anti-triche du flux live."""
+        """Valide un viewer du flux live et charge son mode courant."""
         payload = tokens.verify_token(token, config.WEBAPP_SECRET)
         if payload is None:
             return None, None, (jsonify({"error": "invalid_token"}), 403)
@@ -1081,11 +1274,6 @@ def create_app(bot=None) -> Flask:
         mode = _payload_mode(payload)
         guild_id = int(payload["g"])
         user_id = int(payload["u"])
-        if database.get_daily_attempt(
-            guild_id, date_str, user_id, mode=mode
-        ) is None:
-            return None, None, (jsonify({"error": "answer_required"}), 403)
-
         challenge = _load_challenge(guild_id, date_str, mode)
         if challenge is None:
             return None, None, (jsonify({"error": "no_daily"}), 404)
@@ -1095,6 +1283,8 @@ def create_app(bot=None) -> Flask:
             "mode": mode,
             "user_id": user_id,
         }
+        if _touch_presence(guild_id, date_str, user_id, mode):
+            _publish_realtime((guild_id, date_str))
         return context, challenge, None
 
     @app.route("/daily/state")
@@ -1114,14 +1304,24 @@ def create_app(bot=None) -> Flask:
         response.headers["Cache-Control"] = "no-store"
         return response
 
+    @app.route("/daily/presence", methods=["POST"])
+    @app.route("/.proxy/daily/presence", methods=["POST"])
+    def daily_presence():
+        """Heartbeat court utilisé pour retirer les joueurs ayant quitté l'Activity."""
+        data = request.get_json(silent=True) or {}
+        context, _challenge, error = _realtime_viewer(data.get("token", ""))
+        if error is not None:
+            return error
+        return jsonify({"ok": True})
+
     @app.route("/daily/stream")
     @app.route("/.proxy/daily/stream")
     def daily_stream():
-        """Flux SSE des tentatives et du classement pour un joueur ayant répondu."""
+        """Flux SSE du daily entier, personnalisé selon les modes déjà joués."""
         context, challenge, error = _realtime_viewer(request.args.get("t", ""))
         if error is not None:
             return error
-        key = (context["guild_id"], context["date"], context["mode"])
+        key = (context["guild_id"], context["date"])
 
         def generate():
             subscriber = _subscribe_realtime(key)
@@ -1142,24 +1342,23 @@ def create_app(bot=None) -> Flask:
                     try:
                         subscriber.get(timeout=15)
                     except queue.Empty:
-                        yield ": ping\n\n"
-                    else:
-                        state = _realtime_state(
-                            context["guild_id"],
-                            context["date"],
-                            context["mode"],
-                            context["user_id"],
-                            challenge,
+                        pass
+                    state = _realtime_state(
+                        context["guild_id"],
+                        context["date"],
+                        context["mode"],
+                        context["user_id"],
+                        challenge,
+                    )
+                    yield (
+                        "data: "
+                        + json.dumps(
+                            state,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
                         )
-                        yield (
-                            "data: "
-                            + json.dumps(
-                                state,
-                                ensure_ascii=False,
-                                separators=(",", ":"),
-                            )
-                            + "\n\n"
-                        )
+                        + "\n\n"
+                    )
             finally:
                 _unsubscribe_realtime(key, subscriber)
 
@@ -1262,7 +1461,13 @@ def create_app(bot=None) -> Flask:
         timed_out = False
         if difficulty == "hardcore":
             elapsed = database.get_start_elapsed_seconds(guild_id, today, user_id, mode)
-            if elapsed is not None and elapsed > config.HARDCORE_TIME_LIMIT + 3:
+            allowed_seconds = (
+                config.HARDCORE_TIME_LIMIT
+                + database.get_daily_time_bonus_seconds(
+                    guild_id, today, user_id, mode
+                )
+            )
+            if elapsed is not None and elapsed > allowed_seconds + 3:
                 timed_out = True
                 is_correct = False  # au-delà du temps imparti = défaite
 
@@ -1282,9 +1487,10 @@ def create_app(bot=None) -> Flask:
             guild_id, user_id, user_name, is_correct, mode=mode, points=points
         )
 
+        _touch_presence(guild_id, today, user_id, mode, playing=False)
         state = _realtime_state(guild_id, today, mode, user_id, ch)
         correct_count = sum(1 for result in state["results"] if result["correct"])
-        _publish_realtime((guild_id, today, mode))
+        _publish_realtime((guild_id, today))
 
         # Mode phrase : on révèle l'avatar de l'auteur de chaque phrase APRÈS la
         # réponse (option_id -> avatar). Pas exposé avant (anti-spoil).
@@ -1315,6 +1521,8 @@ def create_app(bot=None) -> Flask:
             "results": state["results"],
             "stats": {"correct": correct_count, "total": len(state["results"])},
             "leaderboard": state["leaderboard"],
+            "progress": state["progress"],
+            "participant_count": state["participant_count"],
         })
 
     @app.route("/daily/start", methods=["POST"])
@@ -1343,12 +1551,46 @@ def create_app(bot=None) -> Flask:
         ):
             wanted = "normal"
 
+        time_bonus_seconds = 0.0
+        if mode == database.MODE_MEDIA and wanted == "hardcore":
+            challenge = _load_challenge(guild_id, today, mode)
+            raw_duration_ms = data.get("media_duration_ms")
+            try:
+                duration_seconds = float(raw_duration_ms) / 1000
+            except (TypeError, ValueError):
+                duration_seconds = 0.0
+            if (
+                challenge is not None
+                and challenge.get("media_is_video")
+                and math.isfinite(duration_seconds)
+            ):
+                time_bonus_seconds = min(
+                    max(0.0, duration_seconds),
+                    _MAX_MEDIA_HARDCORE_BONUS_SECONDS,
+                )
+
         # Enregistre l'heure de départ serveur (non-truquable) ET la difficulté,
         # par mode. Le premier "Jouer" gagne (immuable). Renvoie l'effective.
         effective = database.set_daily_start(
-            guild_id, today, user_id, mode, difficulty=wanted
+            guild_id,
+            today,
+            user_id,
+            mode,
+            difficulty=wanted,
+            time_bonus_seconds=time_bonus_seconds,
         )
-        return jsonify({"difficulty": effective})
+        effective_limit_ms = int(round(1000 * (
+            config.HARDCORE_TIME_LIMIT
+            + database.get_daily_time_bonus_seconds(
+                guild_id, today, user_id, mode
+            )
+        )))
+        _touch_presence(guild_id, today, user_id, mode, playing=True)
+        _publish_realtime((guild_id, today))
+        return jsonify({
+            "difficulty": effective,
+            "hardcore_limit_ms": effective_limit_ms,
+        })
 
     @app.route("/daily/options")
     @app.route("/phrase/options")

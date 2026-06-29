@@ -10,14 +10,16 @@ classements et une interface jouable directement dans une Discord Activity.
   - **Qui a écrit ça ?** : retrouver l'auteur d'un message ;
   - **Devine la phrase** : retrouver la phrase écrite par un membre donné ;
   - **Devine le média** : retrouver l'auteur d'une image, d'un GIF ou d'une vidéo.
-- Mode Hardcore pour les modes auteur et média.
+- Mode Hardcore pour les modes auteur et média. Pour une vidéo, sa durée complète
+  est ajoutée aux 10 secondes de réponse.
 - Temps de réponse calculé côté serveur.
 - Scores, séries, classements complets et résultats du jour.
 - Contexte de conversation révélé uniquement après la réponse.
 - Tirage automatique des défis à minuit.
 - Correction sécurisée des tentatives par les administrateurs autorisés.
-- Mise à jour en temps réel des tentatives et classements par SSE, avec polling
-  automatique si le proxy Discord bloque le flux.
+- Progression anti-spoil des participants sur les trois modes, classement à gauche
+  et suivi en direct à droite.
+- Mise à jour par SSE, avec polling automatique si le proxy Discord bloque le flux.
 - Commande `/optout` pour retirer ses messages du pool local.
 - Activity Discord avec OAuth, contrôle d'appartenance au serveur et restriction
   facultative par rôle.

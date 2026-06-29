@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS daily_start (
     mode       TEXT    NOT NULL,
     started_at TEXT    NOT NULL,
     difficulty TEXT    NOT NULL DEFAULT 'normal',  -- 'normal' | 'hardcore', par mode
+    time_bonus_seconds REAL NOT NULL DEFAULT 0,
     PRIMARY KEY (guild_id, date, user_id, mode)
 );
 
@@ -333,6 +334,8 @@ def init_db() -> None:
         # Hardcore par mode (author + média) : la difficulté est portée par
         # daily_start (mode-aware), pas par daily_lock (qui ne couvrait que author).
         "ALTER TABLE daily_start ADD COLUMN difficulty TEXT NOT NULL DEFAULT 'normal'",
+        # Une vidéo en Hardcore ajoute sa durée au délai de réponse.
+        "ALTER TABLE daily_start ADD COLUMN time_bonus_seconds REAL NOT NULL DEFAULT 0",
     ]
     for stmt in _MIGRATIONS:
         try:
@@ -905,7 +908,12 @@ def opt_in(user_id: int, guild_id: int) -> None:
 
 
 def set_daily_start(
-    guild_id: int, date_str: str, user_id: int, mode: str, difficulty: str = "normal"
+    guild_id: int,
+    date_str: str,
+    user_id: int,
+    mode: str,
+    difficulty: str = "normal",
+    time_bonus_seconds: float = 0,
 ) -> str:
     """Enregistre l'heure de départ serveur + la difficulté pour ce (joueur, mode, jour).
 
@@ -918,9 +926,16 @@ def set_daily_start(
     # fausserait un temps de réponse affiché à 3 décimales / le tri par vitesse.
     conn.execute(
         "INSERT OR IGNORE INTO daily_start "
-        "(guild_id, date, user_id, mode, started_at, difficulty) "
-        "VALUES (?, ?, ?, ?, strftime('%Y-%m-%d %H:%M:%f','now'), ?)",
-        (guild_id, date_str, user_id, mode, difficulty),
+        "(guild_id, date, user_id, mode, started_at, difficulty, time_bonus_seconds) "
+        "VALUES (?, ?, ?, ?, strftime('%Y-%m-%d %H:%M:%f','now'), ?, ?)",
+        (
+            guild_id,
+            date_str,
+            user_id,
+            mode,
+            difficulty,
+            max(0.0, float(time_bonus_seconds)),
+        ),
     )
     conn.commit()
     return get_daily_difficulty(guild_id, date_str, user_id, mode) or difficulty
@@ -937,6 +952,18 @@ def get_daily_difficulty(
         (guild_id, date_str, user_id, mode),
     ).fetchone()
     return row["difficulty"] if row else None
+
+
+def get_daily_time_bonus_seconds(
+    guild_id: int, date_str: str, user_id: int, mode: str
+) -> float:
+    """Temps ajouté au délai Hardcore, verrouillé avec le premier départ."""
+    row = get_conn().execute(
+        "SELECT time_bonus_seconds FROM daily_start "
+        "WHERE guild_id = ? AND date = ? AND user_id = ? AND mode = ?",
+        (guild_id, date_str, user_id, mode),
+    ).fetchone()
+    return float(row["time_bonus_seconds"] or 0) if row else 0.0
 
 
 def get_start_elapsed_seconds(
