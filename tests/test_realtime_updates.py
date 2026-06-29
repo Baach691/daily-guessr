@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import tempfile
 import unittest
 
@@ -43,6 +44,29 @@ class RealtimeUpdatesTests(unittest.TestCase):
             " 'Message mystère', ?)",
             (self.GUILD_ID, self.date, self.CORRECT_ID, options),
         )
+        phrase_options = json.dumps([
+            [300, "Bonne phrase", self.CORRECT_ID],
+            [400, "Une autre phrase", self.WRONG_ID],
+        ])
+        conn.execute(
+            "INSERT INTO phrase_daily "
+            "(guild_id, date, target_author_id, target_author_name, "
+            " correct_message_id, channel_id, content, options) "
+            "VALUES (?, ?, ?, 'Joueur cible', 300, 2, 'Bonne phrase', ?)",
+            (
+                self.GUILD_ID,
+                self.date,
+                self.CORRECT_ID,
+                phrase_options,
+            ),
+        )
+        conn.execute(
+            "INSERT INTO media_daily "
+            "(guild_id, date, message_id, channel_id, author_id, author_name, "
+            " content, options) VALUES (?, ?, 3, 2, ?, 'Bonne réponse', "
+            " 'https://cdn.discordapp.com/attachments/2/3/video.mp4', ?)",
+            (self.GUILD_ID, self.date, self.CORRECT_ID, options),
+        )
         conn.commit()
 
         self.app = server.create_app()
@@ -74,8 +98,9 @@ class RealtimeUpdatesTests(unittest.TestCase):
         )
 
     def _record_attempt(self, user_id, guessed_id=None, mode=database.MODE_AUTHOR):
-        guessed_id = self.CORRECT_ID if guessed_id is None else guessed_id
-        is_correct = guessed_id == self.CORRECT_ID
+        correct_id = 300 if mode == database.MODE_PHRASE else self.CORRECT_ID
+        guessed_id = correct_id if guessed_id is None else guessed_id
+        is_correct = guessed_id == correct_id
         name = f"Joueur {user_id}"
         database.upsert_user(self.GUILD_ID, user_id, name, "")
         self.assertTrue(database.record_daily_attempt(
@@ -108,8 +133,28 @@ class RealtimeUpdatesTests(unittest.TestCase):
         self.assertEqual(data["leaderboard"], [])
         other = next(p for p in data["progress"] if p["user_id"] == "20")
         self.assertEqual(other["statuses"][database.MODE_AUTHOR], "complete")
+        self.assertNotIn(database.MODE_AUTHOR, other["details"])
         self.assertNotIn("guessed_id", json.dumps(data))
         self.assertNotIn("correct_id", json.dumps(data))
+
+    def test_daily_page_embeds_initial_spoiler_safe_progress(self):
+        self._record_attempt(20)
+
+        with self.app.test_client() as client:
+            response = client.get(f"/daily?t={self._token(10)}")
+
+        html = response.get_data(as_text=True)
+        self.assertEqual(response.status_code, 200)
+        match = re.search(r"initialRealtimeState: (.+),\n", html)
+        self.assertIsNotNone(match)
+        state = json.loads(match.group(1))
+        other = next(
+            player
+            for player in state["progress"]
+            if player["user_id"] == "20"
+        )
+        self.assertEqual(other["statuses"][database.MODE_AUTHOR], "complete")
+        self.assertNotIn(database.MODE_AUTHOR, other["details"])
 
     def test_state_contains_personalized_results_and_leaderboard(self):
         self._record_attempt(10)
@@ -141,6 +186,14 @@ class RealtimeUpdatesTests(unittest.TestCase):
             if player["user_id"] == "20"
         )
         self.assertEqual(other["statuses"][database.MODE_AUTHOR], "fail")
+        self.assertEqual(
+            other["details"][database.MODE_AUTHOR]["guess"],
+            "Mauvaise réponse",
+        )
+        self.assertEqual(
+            other["details"][database.MODE_AUTHOR]["time"],
+            "1.200s",
+        )
 
     def test_spoiler_rule_is_applied_independently_for_each_mode(self):
         self._record_attempt(20)
@@ -156,6 +209,32 @@ class RealtimeUpdatesTests(unittest.TestCase):
 
         self.assertEqual(other["statuses"][database.MODE_AUTHOR], "win")
         self.assertEqual(other["statuses"][database.MODE_PHRASE], "complete")
+        self.assertIn(database.MODE_AUTHOR, other["details"])
+        self.assertNotIn(database.MODE_PHRASE, other["details"])
+
+    def test_details_include_guess_and_time_for_all_completed_modes(self):
+        self._record_attempt(20, self.WRONG_ID)
+        self._record_attempt(20, 400, mode=database.MODE_PHRASE)
+        self._record_attempt(20, self.WRONG_ID, mode=database.MODE_MEDIA)
+        self._record_attempt(10)
+        self._record_attempt(10, mode=database.MODE_PHRASE)
+        self._record_attempt(10, mode=database.MODE_MEDIA)
+
+        progress = server._daily_progress_view(
+            self.GUILD_ID,
+            self.date,
+            10,
+        )
+        details = next(
+            player["details"]
+            for player in progress
+            if player["user_id"] == "20"
+        )
+
+        self.assertEqual(details[database.MODE_AUTHOR]["guess"], "Mauvaise réponse")
+        self.assertEqual(details[database.MODE_PHRASE]["guess"], "Une autre phrase")
+        self.assertEqual(details[database.MODE_MEDIA]["guess"], "Mauvaise réponse")
+        self.assertTrue(all(detail["time"] == "1.200s" for detail in details.values()))
 
     def test_start_marks_player_as_playing(self):
         with self.app.test_client() as client:

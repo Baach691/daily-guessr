@@ -109,8 +109,33 @@
         {% else %}
           <img id="daily-media" class="daily-media" src="{{ media_url }}" alt="média mystère"
                decoding="async"
-               onerror="this.insertAdjacentHTML('afterend','&lt;a class=media-fallback href=&quot;{{ media_url }}&quot; target=_blank rel=noopener&gt;Ouvrir le média ↗&lt;/a&gt;'); this.remove();">
+               onerror="this.insertAdjacentHTML('afterend','&lt;p class=media-fallback&gt;Aperçu indisponible. Utilise les boutons ci-dessous.&lt;/p&gt;'); this.remove();">
         {% endif %}
+        <div class="media-actions">
+          <button
+            class="media-action-button"
+            id="media-expand"
+            type="button"
+            title="Agrandir le média"
+            aria-label="Agrandir le média"
+            aria-pressed="false">⛶</button>
+          {% if media_message_url %}
+            <a
+              class="media-direct-link"
+              href="{{ media_message_url }}"
+              target="_blank"
+              rel="noopener noreferrer"
+              {% if is_activity %}data-activity-external{% endif %}>Ouvrir dans Discord ↗</a>
+          {% endif %}
+          {% if media_file_url %}
+            <a
+              class="media-direct-link secondary"
+              href="{{ media_file_url }}"
+              target="_blank"
+              rel="noopener noreferrer"
+              {% if is_activity %}data-activity-external{% endif %}>Ouvrir le fichier ↗</a>
+          {% endif %}
+        </div>
       {% else %}
         <blockquote>{{ message_content }}</blockquote>
       {% endif %}
@@ -288,8 +313,12 @@
       isMedia: {{ 'true' if is_media else 'false' }},
       mediaUrl: {{ (media_url or '') | tojson }},
       mediaIsVideo: {{ 'true' if media_is_video else 'false' }},
+      initialRealtimeState: {{ initial_realtime_state | tojson }},
     };
   </script>
   <script src="{{ asset_url('script.js') }}"></script>
+  {% if is_activity %}
+    <script type="module" src="/assets/activity-bridge.js"></script>
+  {% endif %}
 </body>
 </html>

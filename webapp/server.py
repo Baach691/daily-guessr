@@ -13,8 +13,6 @@ import logging
 import math
 import os
 import queue
-import shutil
-import subprocess
 import threading
 import time
 import urllib.error
@@ -28,9 +26,9 @@ from flask import (
     Response,
     current_app,
     jsonify,
+    redirect,
     render_template,
     request,
-    send_file,
     send_from_directory,
     stream_with_context,
 )
@@ -54,9 +52,6 @@ _live_presence: Dict[PresenceKey, dict] = {}
 _presence_lock = threading.Lock()
 _PRESENCE_TTL_SECONDS = 45
 _MAX_MEDIA_HARDCORE_BONUS_SECONDS = 10 * 60
-_media_cache_locks: Dict[str, threading.Lock] = {}
-_media_cache_locks_guard = threading.Lock()
-_media_cache_last_cleanup = 0.0
 
 DAILY_MODE_SPECS = (
     (database.MODE_AUTHOR, "🌞", "Qui a écrit ça ?"),
@@ -377,153 +372,6 @@ def _is_video_url(url: str) -> bool:
     return u.endswith((".mp4", ".mov", ".webm", ".mkv", ".m4v"))
 
 
-def _media_cache_path(guild_id: int, date_str: str, message_id: int) -> str:
-    """Chemin privé et stable de la version H.264/AAC d'une vidéo quotidienne."""
-    filename = f"{guild_id}_{date_str}_{message_id}.mp4"
-    return os.path.join(config.MEDIA_CACHE_DIR, filename)
-
-
-def _cleanup_media_cache(force: bool = False) -> None:
-    """Supprime périodiquement les transcodages et fichiers partiels trop anciens."""
-    global _media_cache_last_cleanup
-    now = time.time()
-    if not force and now - _media_cache_last_cleanup < 60 * 60:
-        return
-    _media_cache_last_cleanup = now
-    cutoff = now - config.MEDIA_CACHE_RETENTION_HOURS * 60 * 60
-    try:
-        entries = os.scandir(config.MEDIA_CACHE_DIR)
-    except OSError:
-        return
-    with entries:
-        for entry in entries:
-            try:
-                if entry.is_file() and entry.stat().st_mtime < cutoff:
-                    os.unlink(entry.path)
-            except OSError:
-                pass
-
-
-def _download_media_for_transcode(media_url: str, destination: str) -> None:
-    """Télécharge une pièce jointe Discord avec une limite de taille stricte."""
-    request_headers = {
-        "User-Agent": "DiscordBot (https://github.com/Baach691/daily-guessr, 1.0)"
-    }
-    upstream_request = urllib.request.Request(media_url, headers=request_headers)
-    max_bytes = config.MEDIA_MAX_TRANSCODE_MB * 1024 * 1024
-    total = 0
-    with urllib.request.urlopen(upstream_request, timeout=30) as upstream:
-        declared_size = upstream.headers.get("Content-Length")
-        if declared_size and int(declared_size) > max_bytes:
-            raise ValueError("media_too_large")
-        with open(destination, "wb") as output:
-            os.chmod(destination, 0o600)
-            while True:
-                chunk = upstream.read(64 * 1024)
-                if not chunk:
-                    break
-                total += len(chunk)
-                if total > max_bytes:
-                    raise ValueError("media_too_large")
-                output.write(chunk)
-
-
-def _compatible_video_path(
-    guild_id: int,
-    date_str: str,
-    message_id: int,
-    media_url: str,
-) -> Optional[str]:
-    """Crée une version MP4 H.264/AAC lisible par les navigateurs courants."""
-    cache_path = _media_cache_path(guild_id, date_str, message_id)
-    if os.path.isfile(cache_path) and os.path.getsize(cache_path) > 0:
-        return cache_path
-
-    with _media_cache_locks_guard:
-        media_lock = _media_cache_locks.setdefault(cache_path, threading.Lock())
-
-    with media_lock:
-        if os.path.isfile(cache_path) and os.path.getsize(cache_path) > 0:
-            return cache_path
-
-        ffmpeg = shutil.which(config.FFMPEG_PATH)
-        if ffmpeg is None:
-            log.error(
-                "Version vidéo compatible impossible: ffmpeg introuvable (%s)",
-                config.FFMPEG_PATH,
-            )
-            return None
-
-        os.makedirs(config.MEDIA_CACHE_DIR, mode=0o700, exist_ok=True)
-        try:
-            os.chmod(config.MEDIA_CACHE_DIR, 0o700)
-        except OSError:
-            pass
-        _cleanup_media_cache()
-
-        source_path = f"{cache_path}.source"
-        output_path = f"{cache_path}.part.mp4"
-        try:
-            _download_media_for_transcode(media_url, source_path)
-            result = subprocess.run(
-                [
-                    ffmpeg,
-                    "-nostdin",
-                    "-hide_banner",
-                    "-loglevel",
-                    "error",
-                    "-y",
-                    "-i",
-                    source_path,
-                    "-map",
-                    "0:v:0",
-                    "-map",
-                    "0:a:0?",
-                    "-sn",
-                    "-map_metadata",
-                    "-1",
-                    "-c:v",
-                    "libx264",
-                    "-preset",
-                    "veryfast",
-                    "-crf",
-                    "23",
-                    "-pix_fmt",
-                    "yuv420p",
-                    "-vf",
-                    "scale=trunc(iw/2)*2:trunc(ih/2)*2",
-                    "-c:a",
-                    "aac",
-                    "-b:a",
-                    "128k",
-                    "-movflags",
-                    "+faststart",
-                    output_path,
-                ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                text=True,
-                timeout=180,
-                check=False,
-            )
-            if result.returncode != 0 or not os.path.isfile(output_path):
-                details = (result.stderr or "erreur ffmpeg inconnue").strip()[-1000:]
-                log.error("Échec du transcodage vidéo compatible: %s", details)
-                return None
-            os.chmod(output_path, 0o600)
-            os.replace(output_path, cache_path)
-            return cache_path
-        except (OSError, subprocess.SubprocessError, ValueError):
-            log.exception("Impossible de produire la version vidéo compatible")
-            return None
-        finally:
-            for temporary_path in (source_path, output_path):
-                try:
-                    os.unlink(temporary_path)
-                except OSError:
-                    pass
-
-
 def _options_view(guild_id: int, options: list, mode: str) -> list:
     """Options prêtes pour le template.
 
@@ -597,7 +445,8 @@ def _daily_progress_view(
 
     Le résultat d'un mode n'est révélé que si le viewer a lui-même terminé ce
     mode. Avant cela, un résultat achevé est signalé sans indiquer victoire ou
-    défaite. Aucun choix ni contenu de réponse n'entre dans ce payload.
+    défaite. Le temps et le choix n'entrent dans le payload qu'après que le
+    viewer a terminé le mode concerné.
     """
     presence = _active_presence(guild_id, date_str)
     attempts_by_mode = {}
@@ -626,12 +475,21 @@ def _daily_progress_view(
         for mode, attempts in attempts_by_mode.items()
         if viewer_user_id in attempts
     }
+    option_labels_by_mode = {}
+    for mode in viewer_completed:
+        challenge = _load_challenge(guild_id, date_str, mode)
+        if challenge is not None:
+            option_labels_by_mode[mode] = {
+                int(option[0]): option[1]
+                for option in challenge["options"]
+            }
     mode_labels = {mode: label for mode, _icon, label in DAILY_MODE_SPECS}
     out = []
 
     for user_id, participant in participants.items():
         active = presence.get(user_id)
         statuses = {}
+        details = {}
         completed_count = 0
         playing_mode = None
 
@@ -641,6 +499,24 @@ def _daily_progress_view(
                 completed_count += 1
                 if mode in viewer_completed or user_id == viewer_user_id:
                     statuses[mode] = "win" if attempt["correct"] else "fail"
+                    guessed_id = int(attempt.get("guessed_id") or 0)
+                    guess_label = (
+                        option_labels_by_mode.get(mode, {}).get(guessed_id)
+                    )
+                    if not guess_label and mode in (
+                        database.MODE_AUTHOR,
+                        database.MODE_MEDIA,
+                    ):
+                        guess_label = (
+                            database.get_user(guild_id, guessed_id) or {}
+                        ).get("name")
+                    details[mode] = {
+                        "guess": guess_label or "Réponse inconnue",
+                        "time": (
+                            format_duration_ms(attempt.get("time_taken_ms"))
+                            or "Temps inconnu"
+                        ),
+                    }
                 else:
                     statuses[mode] = "complete"
                 continue
@@ -679,6 +555,7 @@ def _daily_progress_view(
             "playing": playing_mode is not None,
             "activity": activity,
             "statuses": statuses,
+            "details": details,
             "is_me": user_id == viewer_user_id,
             "_completed_count": completed_count,
         })
@@ -894,7 +771,6 @@ def _activity_member_has_allowed_role(guild_id: int, user_id: int) -> bool:
 
 
 def create_app(bot=None) -> Flask:
-    _cleanup_media_cache(force=True)
     app = Flask(__name__)
     app.config["JSON_AS_ASCII"] = False
     # Les routes ne reçoivent que de petits payloads JSON. Cette limite coupe
@@ -1126,6 +1002,13 @@ def create_app(bot=None) -> Flask:
             playing=attempt is None and stored_difficulty is not None,
         ):
             _publish_realtime((guild_id, today))
+        initial_realtime_state = _realtime_state(
+            guild_id,
+            today,
+            mode,
+            user_id,
+            ch,
+        )
 
         # Options + (si déjà joué) le % de joueurs ayant choisi chacune (reveal).
         options_view = _options_view(guild_id, ch["options"], mode)
@@ -1145,6 +1028,15 @@ def create_app(bot=None) -> Flask:
             is_media=ch.get("is_media", False),
             media_url=(
                 f"/daily/media?t={token}" if ch.get("is_media", False) else ""
+            ),
+            media_message_url=(
+                "https://discord.com/channels/"
+                f"{guild_id}/{ch['channel_id']}/{ch['message_id']}"
+                if ch.get("is_media", False) else ""
+            ),
+            media_file_url=(
+                f"{config.WEBAPP_BASE_URL.rstrip('/')}/daily/media/open?t={token}"
+                if ch.get("is_media", False) else ""
             ),
             media_is_video=ch.get("media_is_video", False),
             page_title=_titles.get(mode, "Qui a écrit ça ?"),
@@ -1186,7 +1078,38 @@ def create_app(bot=None) -> Flask:
             user_id=user_id,
             user_name=user_name,
             user_avatar=user_avatar,
+            is_activity=is_activity,
+            initial_realtime_state=initial_realtime_state,
         )
+
+    @app.route("/daily/media/open")
+    def daily_media_open():
+        """Redirige à la demande vers une URL CDN Discord fraîche."""
+        token = request.args.get("t", "")
+        payload = tokens.verify_token(token, config.WEBAPP_SECRET)
+        if payload is None or payload.get("d") != today_str():
+            return jsonify({"error": "invalid_token"}), 403
+        if _payload_mode(payload) != database.MODE_MEDIA:
+            return jsonify({"error": "not_media_mode"}), 403
+
+        guild_id = int(payload["g"])
+        daily = database.get_daily(
+            guild_id, today_str(), mode=database.MODE_MEDIA
+        )
+        if daily is None:
+            return jsonify({"error": "no_daily"}), 404
+
+        media_url = fetch_current_media_url(
+            current_app.config.get("BOT"),
+            daily["channel_id"],
+            daily["message_id"],
+        ) or daily["content"]
+        if not _is_discord_attachment_url(media_url):
+            return jsonify({"error": "invalid_media_url"}), 502
+
+        response = redirect(media_url, code=302)
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
     @app.route("/daily/media")
     def daily_media():
@@ -1218,25 +1141,6 @@ def create_app(bot=None) -> Flask:
         if not _is_discord_attachment_url(media_url):
             log.error("URL média Discord refusée: %r", media_url)
             return jsonify({"error": "invalid_media_url"}), 502
-
-        if request.args.get("compat") == "1" and _is_video_url(media_url):
-            compatible_path = _compatible_video_path(
-                guild_id,
-                today_str(),
-                daily["message_id"],
-                media_url,
-            )
-            if compatible_path is not None:
-                response = send_file(
-                    compatible_path,
-                    mimetype="video/mp4",
-                    conditional=True,
-                    etag=True,
-                    max_age=300,
-                )
-                response.headers["Cache-Control"] = "private, max-age=300"
-                return response
-            return jsonify({"error": "compatible_video_unavailable"}), 503
 
         headers = {
             "User-Agent": "DiscordBot (https://github.com/Baach691/daily-guessr, 1.0)"

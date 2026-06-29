@@ -36,12 +36,14 @@ All tests and examples must use clearly fictional identities and identifiers.
 - [x] Three-panel responsive layout and corrected leaderboard alignment.
 - [x] Video duration added to the Hardcore media timer.
 - [x] Rich Presence artwork keys `1` and `2`.
-- [x] Automatic H.264/AAC fallback for browsers unable to decode the original
-  video track, with a private short-lived cache.
+- [x] Media opening through the Activity SDK, the original Discord message or a
+  fresh CDN URL requested only on click, without server-side transcoding.
+- [x] Initial live state embedded in the page before the SSE connection.
+- [x] Persistent Play button in the daily announcement.
 - [x] `TERMS.md` and `PRIVACY.md` added.
 - [x] VPS-specific deployment files removed.
 - [x] Final working-tree secret and identity scan.
-- [x] 24 Python tests, syntax checks and Activity build verification.
+- [x] 28 Python tests, syntax checks and Activity build verification.
 - [x] Publish the sanitized root commit.
 
 ## External setup still required

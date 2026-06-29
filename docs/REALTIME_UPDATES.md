@@ -135,6 +135,10 @@ Un signal global `(guild_id, date)` est publié après :
 Les simples heartbeats renouvellent la date d'expiration sans réveiller tout le
 monde.
 
+La page reçoit aussi un premier état personnalisé dans `window.DAILY` au rendu.
+La colonne En direct est donc remplie immédiatement ; le SSE prend ensuite le relais
+sans modifier les règles anti-spoil.
+
 ## Tests
 
 `tests/test_realtime_updates.py` vérifie notamment :
@@ -148,6 +152,7 @@ monde.
 - l'absence des identifiants de réponse dans le payload protégé ;
 - la publication commune aux trois modes ;
 - le désabonnement du flux lors de la fermeture.
+- l'état initial anti-spoil inclus dans la page avant la connexion SSE.
 
 Commande :
 

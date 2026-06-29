@@ -464,6 +464,89 @@ async def _deny_unauthorized(interaction: discord.Interaction) -> None:
     )
 
 
+class DailyLaunchView(discord.ui.View):
+    """Bouton persistant des annonces quotidiennes."""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="Jouer",
+        emoji="🎮",
+        style=discord.ButtonStyle.primary,
+        custom_id="daily_guessr:launch",
+    )
+    async def launch_daily(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button,
+    ) -> None:
+        if interaction.guild_id is None:
+            await interaction.response.send_message(
+                "Lance ce bouton depuis le serveur du daily.",
+                ephemeral=True,
+            )
+            return
+        if not is_allowed(interaction.user):
+            await _deny_unauthorized(interaction)
+            return
+
+        date_str = today_str()
+        if database.get_daily(interaction.guild_id, date_str) is None:
+            await interaction.response.send_message(
+                "Le daily du jour n'est pas encore prêt. Réessaie dans un instant.",
+                ephemeral=True,
+            )
+            return
+
+        user_name = global_name(interaction.user)
+        user_avatar = _user_avatar_url(interaction.user)
+        database.upsert_user(
+            interaction.guild_id,
+            interaction.user.id,
+            user_name,
+            user_avatar,
+        )
+        try:
+            await interaction.response.launch_activity()
+            return
+        except discord.HTTPException:
+            log.exception(
+                "Bouton d'annonce: lancement Activity refusé "
+                "(guild=%s user=%s), fallback web.",
+                interaction.guild_id,
+                interaction.user.id,
+            )
+
+        url = _build_daily_link(
+            interaction.guild_id,
+            interaction.user.id,
+            date_str,
+            user_name,
+            user_avatar,
+        )
+        fallback_view = discord.ui.View()
+        fallback_view.add_item(discord.ui.Button(
+            style=discord.ButtonStyle.link,
+            label="Ouvrir le daily",
+            emoji="🌐",
+            url=url,
+        ))
+        message = "Discord n'a pas pu ouvrir l'Activity. Utilise le lien web :"
+        if interaction.response.is_done():
+            await interaction.followup.send(
+                message,
+                view=fallback_view,
+                ephemeral=True,
+            )
+        else:
+            await interaction.response.send_message(
+                message,
+                view=fallback_view,
+                ephemeral=True,
+            )
+
+
 # --- Pick en live depuis l'API Discord (plus besoin de /backfill) ---------
 
 def _pickable_channels(guild: discord.Guild) -> List[discord.TextChannel]:
@@ -600,6 +683,7 @@ class Daily(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self._initial_precompute_done = False
+        self.bot.add_view(DailyLaunchView())
 
         # Programmation du pré-calcul quotidien (si activé dans la config).
         scheduled = _parse_precompute_time()
@@ -786,18 +870,19 @@ class Daily(commands.Cog):
             content = (
                 f"🎮 **Daily du {format_date_fr(date_str)} disponible !**\n"
                 f"Modes du jour : {modes_txt}\n\n"
-                f"À vous {mentions} — tapez `/daily` !"
+                f"À vous {mentions} — cliquez sur **Jouer** !"
             )
         else:
             content = (
                 f"🎮 **Daily du {format_date_fr(date_str)} disponible !**\n"
                 f"Modes du jour : {modes_txt}\n"
-                f"Lancez `/daily` pour jouer 🎮"
+                f"Cliquez sur **Jouer** pour lancer l'Activity 🎮"
             )
 
         try:
             await channel.send(
                 content,
+                view=DailyLaunchView(),
                 allowed_mentions=discord.AllowedMentions(
                     users=True, roles=False, everyone=False
                 ),

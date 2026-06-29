@@ -22,6 +22,7 @@
   const startCard = document.getElementById("start-card");
   const startButton = document.getElementById("start-game");
   const messageCard = document.getElementById("message-card");
+  let liveDetailTooltip = null;
 
   // Précharge le média en arrière-plan dès l'ouverture (ce n'est pas un spoil :
   // c'est la question, pas la réponse). Évite l'apparition tardive / le flash sur
@@ -40,77 +41,30 @@
     }
   }
 
-  // Certains MP4 Discord utilisent une piste HEVC/AV1 : le son fonctionne mais
-  // certains PC n'affichent aucune image. Si aucune frame n'est décodée après le
-  // démarrage, on demande automatiquement la version H.264/AAC du serveur.
-  const mediaVideo = document.getElementById("daily-media");
-  if (mediaVideo instanceof HTMLVideoElement) {
-    setupVideoCompatibilityFallback(mediaVideo);
-  }
-
-  function setupVideoCompatibilityFallback(video) {
-    let compatibilityRetried = (video.currentSrc || video.src).includes("compat=1");
-    let frameReceived = false;
-    let frameCheckTimer = null;
-    const supportsFrameCallback = "requestVideoFrameCallback" in video;
-    let compatibilityErrorShown = false;
-
-    const markFrameReceived = () => {
-      frameReceived = true;
-      if (frameCheckTimer) {
-        clearTimeout(frameCheckTimer);
-        frameCheckTimer = null;
-      }
+  const mediaExpand = document.getElementById("media-expand");
+  const mediaCard = messageCard?.classList.contains("media-card")
+    ? messageCard
+    : null;
+  if (mediaExpand && mediaCard) {
+    const setMediaExpanded = (expanded) => {
+      mediaCard.classList.toggle("expanded", expanded);
+      document.body.classList.toggle("media-overlay-open", expanded);
+      mediaExpand.setAttribute("aria-pressed", String(expanded));
+      mediaExpand.setAttribute(
+        "aria-label",
+        expanded ? "Réduire le média" : "Agrandir le média",
+      );
+      mediaExpand.title = expanded ? "Réduire le média" : "Agrandir le média";
+      mediaExpand.textContent = expanded ? "×" : "⛶";
     };
-
-    const retryCompatibleVersion = () => {
-      if (compatibilityRetried) {
-        if (!compatibilityErrorShown) {
-          compatibilityErrorShown = true;
-          video.insertAdjacentHTML(
-            "afterend",
-            '<p class="media-compat-error">Cette vidéo ne peut pas être affichée sur cet appareil.</p>',
-          );
-        }
-        return;
-      }
-      compatibilityRetried = true;
-      if (frameCheckTimer) clearTimeout(frameCheckTimer);
-
-      const resumeAt = Number.isFinite(video.currentTime) ? video.currentTime : 0;
-      const compatibleUrl = new URL(video.currentSrc || video.src, window.location.href);
-      compatibleUrl.searchParams.set("compat", "1");
-      video.src = compatibleUrl.toString();
-      video.load();
-      video.addEventListener("loadedmetadata", () => {
-        if (resumeAt > 0 && Number.isFinite(video.duration)) {
-          video.currentTime = Math.min(resumeAt, video.duration);
-        }
-        video.play().catch(() => {
-          /* Un clic direct peut rester nécessaire selon le client Discord. */
-        });
-      }, { once: true });
-    };
-
-    video.addEventListener("error", retryCompatibleVersion);
-    video.addEventListener("playing", () => {
-      if (compatibilityRetried || frameReceived) return;
-      if (supportsFrameCallback) {
-        video.requestVideoFrameCallback(markFrameReceived);
-      }
-      frameCheckTimer = setTimeout(() => {
-        if (
-          !frameReceived
-          && !video.paused
-          && video.currentTime > 0.5
-          && (supportsFrameCallback || video.videoWidth === 0)
-        ) {
-          retryCompatibleVersion();
-        }
-      }, 1800);
+    mediaExpand.addEventListener("click", () => {
+      setMediaExpanded(!mediaCard.classList.contains("expanded"));
     });
-    video.addEventListener("loadeddata", () => {
-      if (!supportsFrameCallback && video.videoWidth > 0) markFrameReceived();
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && mediaCard.classList.contains("expanded")) {
+        setMediaExpanded(false);
+        mediaExpand.focus();
+      }
     });
   }
 
@@ -358,6 +312,7 @@
     serverRevealBtn.addEventListener("click", () => revealHardcoreOptions(null));
   }
 
+  applyRealtimeState(window.DAILY?.initialRealtimeState);
   startRealtime();
   startPresence();
 
@@ -840,7 +795,17 @@
               ? player.statuses[mode]
               : "waiting";
             const status = statusView[key];
-            return `<span class="live-status ${key}" title="${status.label}" aria-label="${status.label}">${status.symbol}</span>`;
+            const detail = player.details?.[mode];
+            if (!detail) {
+              return `<span class="live-status ${key}" title="${status.label}" aria-label="${status.label}">${status.symbol}</span>`;
+            }
+            const ariaLabel = `${status.label}. Temps : ${detail.time}. Réponse : ${detail.guess}`;
+            return `<span
+              class="live-status ${key} has-details"
+              tabindex="0"
+              aria-label="${escapeAttr(ariaLabel)}"
+              data-time="${escapeAttr(detail.time)}"
+              data-guess="${escapeAttr(detail.guess)}">${status.symbol}</span>`;
           })
           .join("");
         return `
@@ -856,6 +821,46 @@
           </li>`;
       })
       .join("");
+
+    liveList.querySelectorAll(".live-status.has-details").forEach((status) => {
+      status.addEventListener("mouseenter", () => showLiveDetailTooltip(status));
+      status.addEventListener("mouseleave", hideLiveDetailTooltip);
+      status.addEventListener("focus", () => showLiveDetailTooltip(status));
+      status.addEventListener("blur", hideLiveDetailTooltip);
+    });
+  }
+
+  function showLiveDetailTooltip(target) {
+    hideLiveDetailTooltip();
+    const tooltip = document.createElement("div");
+    tooltip.className = "live-detail-tooltip";
+    tooltip.setAttribute("role", "tooltip");
+    tooltip.innerHTML = `
+      <span class="tooltip-time">⏱ ${escapeHtml(target.dataset.time || "Temps inconnu")}</span>
+      <span class="tooltip-guess"><strong>Réponse :</strong> ${escapeHtml(target.dataset.guess || "Inconnue")}</span>`;
+    document.body.appendChild(tooltip);
+
+    const targetRect = target.getBoundingClientRect();
+    const tooltipRect = tooltip.getBoundingClientRect();
+    const left = Math.max(
+      8,
+      Math.min(
+        window.innerWidth - tooltipRect.width - 8,
+        targetRect.left + targetRect.width / 2 - tooltipRect.width / 2,
+      ),
+    );
+    let top = targetRect.top - tooltipRect.height - 8;
+    if (top < 8) top = targetRect.bottom + 8;
+    tooltip.style.left = `${left}px`;
+    tooltip.style.top = `${top}px`;
+    liveDetailTooltip = tooltip;
+  }
+
+  function hideLiveDetailTooltip() {
+    if (liveDetailTooltip) {
+      liveDetailTooltip.remove();
+      liveDetailTooltip = null;
+    }
   }
 
   // --- Panneau gauche : classement du mode courant -------------------------

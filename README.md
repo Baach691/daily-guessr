@@ -12,7 +12,8 @@ classements et une interface jouable directement dans une Discord Activity.
   - **Devine le média** : retrouver l'auteur d'une image, d'un GIF ou d'une vidéo.
 - Mode Hardcore pour les modes auteur et média. Pour une vidéo, sa durée complète
   est ajoutée aux 10 secondes de réponse.
-- Fallback vidéo H.264/AAC lorsqu'un navigateur lit le son sans décoder l'image.
+- Média agrandissable, avec replis vers le message Discord ou le fichier frais
+  dans le navigateur externe lorsqu'un client ne sait pas décoder la vidéo.
 - Temps de réponse calculé côté serveur.
 - Scores, séries, classements complets et résultats du jour.
 - Contexte de conversation révélé uniquement après la réponse.
@@ -20,7 +21,9 @@ classements et une interface jouable directement dans une Discord Activity.
 - Correction sécurisée des tentatives par les administrateurs autorisés.
 - Progression anti-spoil des participants sur les trois modes, classement à gauche
   et suivi en direct à droite.
-- Mise à jour par SSE, avec polling automatique si le proxy Discord bloque le flux.
+- État live initial rendu immédiatement, puis mise à jour par SSE avec polling
+  automatique si le proxy Discord bloque le flux.
+- Bouton persistant dans l'annonce quotidienne pour lancer directement l'Activity.
 - Commande `/optout` pour retirer ses messages du pool local.
 - Activity Discord avec OAuth, contrôle d'appartenance au serveur et restriction
   facultative par rôle.
@@ -71,16 +74,6 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Le fallback vidéo nécessite `ffmpeg` :
-
-```bash
-# Debian / Ubuntu
-sudo apt install ffmpeg
-
-# macOS
-brew install ffmpeg
-```
-
 Renseigner au minimum dans `.env` :
 
 ```ini
@@ -119,10 +112,6 @@ Le fichier [.env.example](./.env.example) documente toutes les variables.
 | `DAILY_PRECOMPUTE_TIME` | Heure locale de préparation des défis. |
 | `WEBAPP_BASE_URL` | Origine publique HTTPS du jeu. |
 | `WEBAPP_THREADS` | Taille du pool Waitress pour les flux temps réel. |
-| `FFMPEG_PATH` | Exécutable utilisé pour le fallback vidéo H.264/AAC. |
-| `MEDIA_CACHE_DIR` | Cache local privé des vidéos compatibles. |
-| `MEDIA_CACHE_RETENTION_HOURS` | Durée maximale du cache vidéo. |
-| `MEDIA_MAX_TRANSCODE_MB` | Taille maximale d'une vidéo à convertir. |
 | `VITE_DISCORD_CLIENT_ID` | ID public de l'application Discord. |
 | `DISCORD_CLIENT_SECRET` | Secret OAuth de l'application, côté serveur uniquement. |
 
@@ -156,7 +145,6 @@ partie de ce dépôt.
 ## Tests
 
 ```bash
-ffmpeg -version
 .venv/bin/python -m unittest discover -s tests -v
 .venv/bin/python -m py_compile bot.py config.py database.py webapp/server.py
 node --check webapp/static/script.js
