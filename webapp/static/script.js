@@ -22,6 +22,8 @@
   const startCard = document.getElementById("start-card");
   const startButton = document.getElementById("start-game");
   const messageCard = document.getElementById("message-card");
+  const sequenceList = document.getElementById("sequence-list");
+  const sequenceSubmit = document.getElementById("sequence-submit");
   let liveDetailTooltip = null;
 
   // Précharge le média en arrière-plan dès l'ouverture (ce n'est pas un spoil :
@@ -93,10 +95,14 @@
   }
 
   function streakEmoji(n) {
-    if (n >= 25) return "☢️";
-    if (n >= 10) return "💎";
-    if (n >= 5) return "🚀";
-    if (n >= 2) return "🔥";
+    const tiers = [
+      [50, "♾️"], [45, "🌌"], [40, "🪐"], [35, "🏆"],
+      [30, "🌟"], [25, "☢️"], [20, "👑"], [15, "✨"],
+      [10, "💎"], [5, "🚀"], [2, "🔥"],
+    ];
+    for (const [threshold, emoji] of tiers) {
+      if (n >= threshold) return emoji;
+    }
     return "🧊";
   }
 
@@ -319,7 +325,7 @@
 
   // --- Si déjà joué au chargement : on charge directement le contexte. -----
   if (alreadyPlayed) {
-    loadContext();
+    if (!window.DAILY?.isSequence) loadContext();
     return;
   }
 
@@ -349,6 +355,7 @@
   if (startButton) {
     startButton.addEventListener("click", startGame);
   }
+  setupSequenceControls();
 
   attachOptionListeners();
   function attachOptionListeners() {
@@ -357,6 +364,79 @@
       btn.dataset.bound = "1";
       btn.addEventListener("click", () => submitAnswer(btn.dataset.id, btn));
     });
+  }
+
+  function setupSequenceControls() {
+    if (!sequenceList || !sequenceSubmit) return;
+    let dragged = null;
+
+    const refreshPositions = () => {
+      const items = [...sequenceList.querySelectorAll(".sequence-item")];
+      items.forEach((item, index) => {
+        const position = item.querySelector(".sequence-position");
+        if (position) position.textContent = String(index + 1);
+        const up = item.querySelector('[data-direction="-1"]');
+        const down = item.querySelector('[data-direction="1"]');
+        if (up) up.disabled = index === 0;
+        if (down) down.disabled = index === items.length - 1;
+      });
+    };
+
+    sequenceList.querySelectorAll(".sequence-item").forEach((item) => {
+      item.addEventListener("dragstart", (event) => {
+        dragged = item;
+        item.classList.add("dragging");
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData("text/plain", item.dataset.messageId);
+      });
+      item.addEventListener("dragover", (event) => {
+        if (!dragged || dragged === item) return;
+        event.preventDefault();
+        item.classList.add("drag-over");
+        const rect = item.getBoundingClientRect();
+        const after = event.clientY > rect.top + rect.height / 2;
+        sequenceList.insertBefore(dragged, after ? item.nextSibling : item);
+      });
+      item.addEventListener("dragleave", () => item.classList.remove("drag-over"));
+      item.addEventListener("drop", (event) => {
+        event.preventDefault();
+        item.classList.remove("drag-over");
+        refreshPositions();
+      });
+      item.addEventListener("dragend", () => {
+        item.classList.remove("dragging");
+        sequenceList.querySelectorAll(".drag-over").forEach(
+          (entry) => entry.classList.remove("drag-over"),
+        );
+        dragged = null;
+        refreshPositions();
+      });
+    });
+
+    sequenceList.querySelectorAll(".sequence-move").forEach((button) => {
+      button.addEventListener("click", () => {
+        const item = button.closest(".sequence-item");
+        const direction = Number(button.dataset.direction);
+        const sibling = direction < 0
+          ? item.previousElementSibling
+          : item.nextElementSibling;
+        if (!sibling) return;
+        if (direction < 0) {
+          sequenceList.insertBefore(item, sibling);
+        } else {
+          sequenceList.insertBefore(sibling, item);
+        }
+        refreshPositions();
+        button.focus();
+      });
+    });
+
+    sequenceSubmit.addEventListener("click", () => {
+      const guessOrder = [...sequenceList.querySelectorAll(".sequence-item")]
+        .map((item) => String(item.dataset.messageId));
+      submitAnswer(null, null, { guessOrder });
+    });
+    refreshPositions();
   }
 
   async function startGame() {
@@ -499,9 +579,14 @@
       timerEl.classList.remove("danger");
     }
     document.querySelectorAll(".option").forEach((b) => b.classList.add("disabled"));
+    if (sequenceSubmit) sequenceSubmit.disabled = true;
+    document.querySelectorAll(".sequence-move").forEach((button) => {
+      button.disabled = true;
+    });
     lockHardcore();
 
     const guessText = opts && opts.guessText;
+    const guessOrder = opts && opts.guessOrder;
     let data;
     try {
       const res = await fetch("/daily/answer", {
@@ -511,6 +596,7 @@
           token,
           guessed_id: guessedId,
           guess_text: guessText,
+          guess_order: guessOrder,
           time_taken_ms: elapsedMs,
         }),
       });
@@ -539,6 +625,9 @@
       });
     }
     if (optionsContainer) optionsContainer.classList.add("revealed");
+    if (window.DAILY?.isSequence) {
+      revealSequence(data.correct_order || [], data.guessed_id);
+    }
     paintButtons(clickedBtn, data);
     paintDistribution(data);
     animateStats(data);
@@ -547,7 +636,72 @@
     startRealtime();
     showResult(data);
     setupRevealForHardcore(data);
-    loadContext();
+    if (!window.DAILY?.isSequence) loadContext();
+  }
+
+  function revealSequence(correctOrder, exactScore) {
+    if (!sequenceList || !Array.isArray(correctOrder)) return;
+    const items = new Map(
+      [...sequenceList.querySelectorAll(".sequence-item")]
+        .map((item) => [String(item.dataset.messageId), item]),
+    );
+    const guessedItems = [...sequenceList.querySelectorAll(".sequence-item")];
+    guessedItems.forEach((item, index) => {
+      item.draggable = false;
+      item.classList.add("revealed");
+      item.querySelector(".sequence-handle")?.remove();
+      item.querySelector(".sequence-controls")?.remove();
+      const position = item.querySelector(".sequence-position");
+      if (position) position.textContent = String(index + 1);
+      const isCorrect = String(item.dataset.messageId) === String(correctOrder[index]);
+      if (!item.querySelector(".sequence-result-mark")) {
+        item.insertAdjacentHTML(
+          "beforeend",
+          `<span class="sequence-result-mark ${isCorrect ? "correct" : "wrong"}"
+                 aria-label="${isCorrect ? "Position correcte" : "Position incorrecte"}">
+             ${isCorrect ? "✓" : "×"}
+           </span>`,
+        );
+      }
+    });
+
+    sequenceList.classList.remove("sequence-list-interactive");
+    sequenceList.classList.add("sequence-list-guess");
+
+    const score = Math.max(0, Math.min(5, Number(exactScore) || 0));
+    const guessBlock = document.createElement("section");
+    guessBlock.className = "sequence-answer-block sequence-guess-block";
+    guessBlock.innerHTML = `
+      <div class="sequence-answer-label">
+        <h3>Ton ordre</h3>
+        <strong>${score}/5</strong>
+      </div>`;
+    sequenceList.parentNode.insertBefore(guessBlock, sequenceList);
+    guessBlock.appendChild(sequenceList);
+
+    const correctBlock = document.createElement("section");
+    correctBlock.className = "sequence-answer-block";
+    correctBlock.id = "sequence-correct-block";
+    correctBlock.innerHTML = `
+      <div class="sequence-answer-label">
+        <h3>Bon ordre</h3>
+      </div>
+      <ol class="sequence-list sequence-list-correct" id="sequence-correct-list"></ol>`;
+    const correctList = correctBlock.querySelector(".sequence-list");
+    correctOrder.forEach((messageId, index) => {
+      const source = items.get(String(messageId));
+      if (!source) return;
+      const item = source.cloneNode(true);
+      item.draggable = false;
+      item.querySelector(".sequence-handle")?.remove();
+      item.querySelector(".sequence-controls")?.remove();
+      item.querySelector(".sequence-result-mark")?.remove();
+      const position = item.querySelector(".sequence-position");
+      if (position) position.textContent = String(index + 1);
+      correctList.appendChild(item);
+    });
+    guessBlock.insertAdjacentElement("afterend", correctBlock);
+    if (sequenceSubmit) sequenceSubmit.remove();
   }
 
   // --- Hardcore : révéler les propositions du mode Normal (+ %) au reveal ---
@@ -781,7 +935,7 @@
     if (hcSection) hcSection.hidden = true;
   }
 
-  // --- Panneau droit : progression des trois modes -------------------------
+  // --- Panneau droit : progression des quatre modes ------------------------
   function repaintLiveProgress(players) {
     if (!liveList || !Array.isArray(players)) return;
     if (!players.length) {
@@ -789,7 +943,7 @@
       return;
     }
 
-    const modes = ["author", "phrase", "media"];
+    const modes = ["author", "phrase", "media", "sequence"];
     const statusView = {
       win: { symbol: "✓", label: "Réussi" },
       fail: { symbol: "×", label: "Raté" },
@@ -806,16 +960,25 @@
               : "waiting";
             const status = statusView[key];
             const detail = player.details?.[mode];
+            let statusClass = key;
+            let symbol = status.symbol;
+            let label = status.label;
+            if (mode === "sequence" && detail?.score !== null && detail?.score !== undefined) {
+              const score = Math.max(0, Math.min(5, Number(detail.score) || 0));
+              statusClass = score === 5 ? "win" : score === 0 ? "fail" : "partial";
+              symbol = score === 5 ? "✓" : score === 0 ? "×" : String(score);
+              label = `${score}/5 bien placé${score === 1 ? "" : "s"}`;
+            }
             if (!detail) {
               return `<span class="live-status ${key}" title="${status.label}" aria-label="${status.label}">${status.symbol}</span>`;
             }
-            const ariaLabel = `${status.label}. Temps : ${detail.time}. Réponse : ${detail.guess}`;
+            const ariaLabel = `${label}. Temps : ${detail.time}. Réponse : ${detail.guess}`;
             return `<span
-              class="live-status ${key} has-details"
+              class="live-status ${statusClass} has-details"
               tabindex="0"
               aria-label="${escapeAttr(ariaLabel)}"
               data-time="${escapeAttr(detail.time)}"
-              data-guess="${escapeAttr(detail.guess)}">${status.symbol}</span>`;
+              data-guess="${escapeAttr(detail.guess)}">${symbol}</span>`;
           })
           .join("");
         return `
@@ -893,7 +1056,7 @@
           <li class="lb-row${e.is_me ? " me" : ""}">
             <span class="lb-rank">${medal(e.rank)}</span>
             <img class="lb-avatar" src="${escapeAttr(e.avatar_url || "")}" alt="" loading="lazy">
-            <span class="lb-name">${escapeHtml(e.name)}</span>
+            <span class="lb-name">${escapeHtml(e.name)}${e.played_today ? '<i class="lb-today" title="A joué aujourd’hui" aria-label="A joué aujourd’hui"></i>' : ""}</span>
             <span class="lb-pts">${e.points} pts</span>
             <span class="lb-score">${e.correct}/${e.total}</span>
             <span class="lb-streak">${streakBadge(e)}</span>
@@ -903,9 +1066,14 @@
   }
 
   function lossEmoji(n) {
-    if (n >= 10) return "⚰️";
-    if (n >= 5) return "💀";
-    if (n >= 2) return "📉";
+    const tiers = [
+      [50, "🌑"], [45, "🫥"], [40, "🪦"], [35, "🧨"],
+      [30, "🚨"], [25, "☠️"], [20, "🌋"], [15, "🕳️"],
+      [10, "⚰️"], [5, "💀"], [2, "📉"],
+    ];
+    for (const [threshold, emoji] of tiers) {
+      if (n >= threshold) return emoji;
+    }
     return "🥶";
   }
 
@@ -1052,10 +1220,17 @@
     section.className = "result";
     section.id = "result";
     const isPhrase = window.DAILY?.isPhrase;
+    const isSequence = window.DAILY?.isSequence;
     const subject = window.DAILY?.subjectName || data.correct_name;
-    const reveal = isPhrase
-      ? `C'était la phrase de <strong>${escapeHtml(subject)}</strong>.`
-      : `C'était <strong>${escapeHtml(data.correct_name)}</strong>.`;
+    const reveal = isSequence
+      ? (
+          data.correct
+            ? "Les 5 messages sont dans le bon ordre."
+            : `Tu avais <strong>${escapeHtml(data.guessed_id)}/5</strong> positions exactes. L’ordre correct est affiché au-dessus.`
+        )
+      : isPhrase
+        ? `C'était la phrase de <strong>${escapeHtml(subject)}</strong>.`
+        : `C'était <strong>${escapeHtml(data.correct_name)}</strong>.`;
     const ptsLine =
       data.correct && data.points_awarded
         ? `<p class="result-points">+${data.points_awarded} point${data.points_awarded > 1 ? "s" : ""}${
@@ -1078,7 +1253,11 @@
       <p>${reveal}</p>
       ${ptsLine}
     `;
-    optionsContainer.parentNode.insertBefore(section, optionsContainer);
+    const anchor = optionsContainer || messageCard;
+    anchor.parentNode.insertBefore(
+      section,
+      optionsContainer || messageCard.nextSibling,
+    );
     section.scrollIntoView({ behavior: "smooth", block: "center" });
   }
 
@@ -1093,6 +1272,10 @@
     alert(map[code] || `Erreur : ${code}`);
     answering = false;
     document.querySelectorAll(".option").forEach((b) => b.classList.remove("disabled"));
+    if (sequenceSubmit) sequenceSubmit.disabled = false;
+    document.querySelectorAll(".sequence-move").forEach((button) => {
+      button.disabled = false;
+    });
     if (hcInput) hcInput.disabled = false;
     // La réponse n'est pas passée (ex: réseau) : on ré-affiche la barre Hardcore
     // masquée par lockHardcore, pour que le joueur puisse réessayer.

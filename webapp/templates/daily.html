@@ -1,3 +1,46 @@
+{% macro sequence_list(messages, list_id, variant) -%}
+  <ol class="sequence-list sequence-list-{{ variant }}" id="{{ list_id }}">
+    {% for message in messages %}
+      <li class="sequence-item{% if variant != 'interactive' %} revealed{% endif %}"
+          data-message-id="{{ message.id }}"
+          draggable="{{ 'true' if variant == 'interactive' else 'false' }}">
+        <span class="sequence-position" aria-hidden="true">{{ loop.index }}</span>
+        {% if variant == 'interactive' %}
+          <span class="sequence-handle" aria-hidden="true">⠿</span>
+        {% endif %}
+        <div class="sequence-message">
+          <div class="sequence-author">
+            <img src="{{ message.author_avatar_url }}" alt="" loading="lazy">
+            <strong>{{ message.author_name }}</strong>
+          </div>
+          {% if message.content %}
+            <p>{{ message.content }}</p>
+          {% endif %}
+          {% if message.has_media %}
+            {% if message.media_is_video %}
+              <video src="{{ message.media_url }}" controls preload="metadata" playsinline></video>
+            {% else %}
+              <img class="sequence-media" src="{{ message.media_url }}" alt="Média joint au message" loading="lazy">
+            {% endif %}
+          {% endif %}
+        </div>
+        {% if variant == 'interactive' %}
+          <div class="sequence-controls">
+            <button type="button" class="sequence-move" data-direction="-1"
+                    title="Monter" aria-label="Monter ce message">↑</button>
+            <button type="button" class="sequence-move" data-direction="1"
+                    title="Descendre" aria-label="Descendre ce message">↓</button>
+          </div>
+        {% elif variant == 'guess' %}
+          <span class="sequence-result-mark {{ 'correct' if message.position_correct else 'wrong' }}"
+                aria-label="{{ 'Position correcte' if message.position_correct else 'Position incorrecte' }}">
+            {{ '✓' if message.position_correct else '×' }}
+          </span>
+        {% endif %}
+      </li>
+    {% endfor %}
+  </ol>
+{%- endmacro %}
 <!DOCTYPE html>
 <html lang="fr">
 <head>
@@ -8,7 +51,7 @@
   <link rel="stylesheet" href="{{ asset_url('style.css') }}">
 </head>
 <body data-has-attempt="{{ '1' if attempt else '0' }}">
-  <div class="layout">
+  <div class="layout{% if leaderboard_hidden %} no-ranking{% endif %}">
   <main class="container">
 
     <header class="header">
@@ -57,6 +100,8 @@
             L'utilisateur mystère et les 4 phrases restent masqués jusqu'au départ.
           {% elif is_media %}
             Le média mystère et les propositions restent masqués jusqu'au départ.
+          {% elif is_sequence %}
+            Les 5 messages mélangés restent masqués jusqu'au départ.
           {% else %}
             Le message mystère et les propositions restent masqués jusqu'au départ.
           {% endif %}
@@ -96,10 +141,35 @@
       </section>
     {% endif %}
 
-    <section class="message-card{% if is_media %} media-card{% endif %}" id="message-card"
-             aria-label="{{ 'Question' if is_phrase else ('Média mystère' if is_media else 'Message mystère') }}"
+    <section class="message-card{% if is_media %} media-card{% endif %}{% if is_sequence %} sequence-card{% endif %}" id="message-card"
+             aria-label="{{ 'Conversation à remettre dans l’ordre' if is_sequence else ('Question' if is_phrase else ('Média mystère' if is_media else 'Message mystère')) }}"
              {% if not attempt %}hidden{% endif %}>
-      {% if is_phrase %}
+      {% if is_sequence %}
+        <div class="sequence-heading">
+          <p class="start-kicker">Du plus ancien au plus récent</p>
+          <h2>Remets les messages dans l'ordre</h2>
+        </div>
+        {% if attempt %}
+          <section class="sequence-answer-block sequence-guess-block">
+            <div class="sequence-answer-label">
+              <h3>Ton ordre</h3>
+              <strong>{{ attempt.guessed_id }}/5</strong>
+            </div>
+            {{ sequence_list(sequence_messages, 'sequence-list', 'guess') }}
+          </section>
+          <section class="sequence-answer-block" id="sequence-correct-block">
+            <div class="sequence-answer-label">
+              <h3>Bon ordre</h3>
+            </div>
+            {{ sequence_list(sequence_correct_messages, 'sequence-correct-list', 'correct') }}
+          </section>
+        {% else %}
+          {{ sequence_list(sequence_messages, 'sequence-list', 'interactive') }}
+          <button class="sequence-submit" id="sequence-submit" type="button">
+            Valider l'ordre
+          </button>
+        {% endif %}
+      {% elif is_phrase %}
         <p class="phrase-question">
           <img class="subject-avatar" src="{{ subject_avatar_url }}" alt="" loading="lazy">
           <span>Quelle phrase a été écrite par <strong>{{ subject_name }}</strong> ?</span>
@@ -141,7 +211,16 @@
     {% if attempt %}
       <section class="result" id="result">
         <h2>{{ '✅ Bien joué !' if attempt.correct else '❌ Raté.' }}</h2>
-        {% if is_phrase %}
+        {% if is_sequence %}
+          <p>
+            {% if attempt.correct %}
+              Les 5 messages sont dans le bon ordre.
+            {% else %}
+              Tu avais <strong>{{ attempt.guessed_id }}/5</strong> positions exactes.
+              L'ordre correct est affiché ci-dessus.
+            {% endif %}
+          </p>
+        {% elif is_phrase %}
           <p>C'était la phrase de <strong>{{ subject_name }}</strong>.</p>
         {% else %}
           <p>C'était <strong>{{ correct_author_name }}</strong>.</p>
@@ -157,11 +236,12 @@
     {% set played_hardcore = attempt and attempt.difficulty == 'hardcore' %}
     {% set show_options = attempt
                           or (not attempt and locked_difficulty == 'normal') %}
-    {% if played_hardcore %}
+    {% if played_hardcore and not is_sequence %}
       <button class="reveal-options-btn" id="reveal-options-btn" type="button">
         👁️ Voir les propositions du mode Normal (et les %)
       </button>
     {% endif %}
+    {% if not is_sequence %}
     <section
       class="options{% if not attempt %} prestart{% endif %}{% if attempt %} revealed{% endif %}"
       id="options"
@@ -195,6 +275,7 @@
         {% endfor %}
       {% endif %}
     </section>
+    {% endif %}
 
     {% if hardcore_enabled %}
       <section class="hardcore-search" id="hardcore-search" hidden aria-label="Saisie du pseudo">
@@ -242,6 +323,7 @@
     </footer>
   </main>
 
+  {% if not leaderboard_hidden %}
   <aside class="sidebar ranking-sidebar" id="sidebar">
     <div class="sidebar-heading">
       <h2>Classement</h2>
@@ -255,7 +337,12 @@
           <li class="lb-row{% if e.is_me %} me{% endif %}">
             <span class="lb-rank">{{ ['🥇','🥈','🥉'][e.rank-1] if e.rank <= 3 else e.rank ~ '.' }}</span>
             <img class="lb-avatar" src="{{ e.avatar_url }}" alt="" loading="lazy">
-            <span class="lb-name">{{ e.name }}</span>
+            <span class="lb-name">
+              {{ e.name }}
+              {% if e.played_today %}
+                <i class="lb-today" title="A joué aujourd'hui" aria-label="A joué aujourd'hui"></i>
+              {% endif %}
+            </span>
             <span class="lb-pts">{{ e.points }} pts</span>
             <span class="lb-score">{{ e.correct }}/{{ e.total }}</span>
             <span class="lb-streak">
@@ -273,6 +360,7 @@
       {% endif %}
     </ol>
   </aside>
+  {% endif %}
 
   <aside class="sidebar live-sidebar" id="live-sidebar">
     <div class="sidebar-heading live-heading">
@@ -284,6 +372,7 @@
       <span title="Qui a écrit ça ?">🌞</span>
       <span title="Devine la phrase">✍️</span>
       <span title="Devine le média">🖼️</span>
+      <span title="Remets dans l'ordre">🔀</span>
     </div>
     <ul class="live-list" id="live-list">
       <li class="live-empty">Connexion au suivi en direct…</li>
@@ -292,6 +381,7 @@
       <span><b class="legend-status win">✓</b> Réussi</span>
       <span><b class="legend-status fail">×</b> Raté</span>
       <span><b class="legend-status playing">⌛</b> En cours</span>
+      <span><b class="legend-status partial">1-4</b> Bien placés</span>
       <span><b class="legend-status complete">✓</b> Résultat masqué</span>
     </div>
   </aside>
@@ -309,6 +399,7 @@
       hardcoreMs: {{ hardcore_limit_ms }},
       mediaHardcoreMaxMs: {{ media_hardcore_max_ms }},
       isMedia: {{ 'true' if is_media else 'false' }},
+      isSequence: {{ 'true' if is_sequence else 'false' }},
       mediaUrl: {{ (media_url or '') | tojson }},
       mediaIsVideo: {{ 'true' if media_is_video else 'false' }},
       mediaIsGif: {{ 'true' if media_is_gif else 'false' }},

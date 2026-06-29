@@ -58,30 +58,48 @@ def format_date_fr(date_str: str) -> str:
 def streak_emoji(streak: int) -> str:
     """Emoji adaptatif à la valeur de la streak (victoires).
 
-    🧊 (0-1)  ·  🔥 (2-4)  ·  🚀 (5-9)  ·  💎 (10-24)  ·  ☢️ (25+)
+    Les paliers historiques sont conservés, puis l'emoji change tous les 5.
     """
-    if streak >= 25:
-        return "☢️"
-    if streak >= 10:
-        return "💎"
-    if streak >= 5:
-        return "🚀"
-    if streak >= 2:
-        return "🔥"
+    tiers = (
+        (50, "♾️"),
+        (45, "🌌"),
+        (40, "🪐"),
+        (35, "🏆"),
+        (30, "🌟"),
+        (25, "☢️"),
+        (20, "👑"),
+        (15, "✨"),
+        (10, "💎"),
+        (5, "🚀"),
+        (2, "🔥"),
+    )
+    for threshold, emoji in tiers:
+        if streak >= threshold:
+            return emoji
     return "🧊"
 
 
 def loss_streak_emoji(loss: int) -> str:
     """Emoji adaptatif à la série de défaites consécutives.
 
-    🥶 (1)  ·  📉 (2-4)  ·  💀 (5-9)  ·  ⚰️ (10+)
+    Les paliers historiques sont conservés, puis l'emoji change tous les 5.
     """
-    if loss >= 10:
-        return "⚰️"
-    if loss >= 5:
-        return "💀"
-    if loss >= 2:
-        return "📉"
+    tiers = (
+        (50, "🌑"),
+        (45, "🫥"),
+        (40, "🪦"),
+        (35, "🧨"),
+        (30, "🚨"),
+        (25, "☠️"),
+        (20, "🌋"),
+        (15, "🕳️"),
+        (10, "⚰️"),
+        (5, "💀"),
+        (2, "📉"),
+    )
+    for threshold, emoji in tiers:
+        if loss >= threshold:
+            return emoji
     return "🥶"
 
 
@@ -186,6 +204,8 @@ def _format_results_list(results, mode=database.MODE_AUTHOR) -> str:
         line = f"{emoji} **{r['user_name']}**"
         if show_diff:
             line += " · " + ("💀" if r.get("difficulty") == "hardcore" else "😀")
+        if mode == database.MODE_SEQUENCE:
+            line += f" · {r.get('guessed_id', 0)}/5"
         ms = r.get("time_taken_ms")
         if ms is not None:
             line += f" · {ms / 1000:.3f}s"
@@ -204,6 +224,7 @@ MODE_LABEL = {
     database.MODE_AUTHOR: "🕵️ Qui a écrit ça ?",
     database.MODE_PHRASE: "✍️ Devine la phrase",
     database.MODE_MEDIA: "🖼️ Devine le média",
+    database.MODE_SEQUENCE: "🔀 Remets dans l'ordre",
 }
 
 # Emoji court par mode (récap "Général" de /daily-resultats).
@@ -211,17 +232,28 @@ MODE_EMOJI = {
     database.MODE_AUTHOR: "🕵️",
     database.MODE_PHRASE: "✍️",
     database.MODE_MEDIA: "🖼️",
+    database.MODE_SEQUENCE: "🔀",
 }
 
 # Pseudo-mode pour l'onglet récap de /daily-resultats (PAS un vrai mode BDD :
-# il agrège les 3 modes, jamais passé à get_daily_results).
+# il agrège les modes, jamais passé à get_daily_results).
 MODE_GENERAL = "general"
 MODE_LABEL[MODE_GENERAL] = "📊 Général"
 
-# Modes affichés dans /classement (les 3 modes).
-CLASSEMENT_MODES = (database.MODE_AUTHOR, database.MODE_PHRASE, database.MODE_MEDIA)
-# Modes affichés dans /daily-resultats, /winner, /loser (média inclus).
-RESULTS_MODES = (database.MODE_AUTHOR, database.MODE_PHRASE, database.MODE_MEDIA)
+# Modes affichés dans /classement.
+CLASSEMENT_MODES = (
+    database.MODE_AUTHOR,
+    database.MODE_PHRASE,
+    database.MODE_MEDIA,
+    database.MODE_SEQUENCE,
+)
+# Modes affichés dans /daily-resultats, /winner et /loser.
+RESULTS_MODES = (
+    database.MODE_AUTHOR,
+    database.MODE_PHRASE,
+    database.MODE_MEDIA,
+    database.MODE_SEQUENCE,
+)
 
 
 def _streak_badge(r) -> str:
@@ -350,7 +382,7 @@ def build_general_results_embed(guild_id: int) -> discord.Embed:
     N = nombre de modes auxquels le joueur a participé (donc /3 s'il a tout fait,
     /1 ou /2 sinon). Classé du meilleur au moins bon."""
     date_str = today_str()
-    modes = (database.MODE_AUTHOR, database.MODE_PHRASE, database.MODE_MEDIA)
+    modes = RESULTS_MODES
     title = f"🌞 Daily du {format_date_fr(date_str)} — {MODE_LABEL[MODE_GENERAL]}"
 
     # Agrégat par joueur : {user_id: {"name": ..., "modes": {mode: bool}}}
@@ -392,7 +424,12 @@ def build_general_results_embed(guild_id: int) -> discord.Embed:
     embed = discord.Embed(
         title=title, description="\n".join(lines), color=discord.Color.gold()
     )
-    embed.set_footer(text="🕵️ Qui a écrit ça ? · ✍️ Devine la phrase · 🖼️ Devine le média")
+    embed.set_footer(
+        text=(
+            "🕵️ Qui a écrit ça ? · ✍️ Devine la phrase · "
+            "🖼️ Devine le média · 🔀 Remets dans l'ordre"
+        )
+    )
     return embed
 
 
@@ -726,11 +763,11 @@ class Daily(commands.Cog):
     async def _precompute_for_all_guilds(self, *, label: str) -> None:
         from cogs.media import ensure_media_daily_for_guild
         from cogs.phrase import ensure_phrase_daily_for_guild
+        from cogs.sequence import ensure_sequence_daily_for_guild
 
         date_str = today_str()
         for guild in list(self.bot.guilds):
-            # On prépare les TROIS modes ici (scheduler unique), puis une seule
-            # annonce combinée — pour ne pas envoyer 3 pings à minuit.
+            # On prépare les quatre modes ici, puis une seule annonce combinée.
             await self._precompute_for_guild(guild, date_str, label=label)
             try:
                 await ensure_phrase_daily_for_guild(guild, date_str, label=label)
@@ -740,6 +777,14 @@ class Daily(commands.Cog):
                 await ensure_media_daily_for_guild(guild, date_str, label=label)
             except Exception:
                 log.exception("Pré-calcul média (%s) : échec pour %s.", label, guild.name)
+            try:
+                await ensure_sequence_daily_for_guild(guild, date_str, label=label)
+            except Exception:
+                log.exception(
+                    "Pré-calcul séquence (%s) : échec pour %s.",
+                    label,
+                    guild.name,
+                )
             await self._announce_new_daily(guild, date_str)
 
     async def _precompute_for_guild(
@@ -848,7 +893,7 @@ class Daily(commands.Cog):
             log.warning("Aucun salon d'annonce postable pour %s — annonce reportée.", guild.name)
             return
 
-        # Modes disponibles aujourd'hui (un seul message pour les trois).
+        # Modes disponibles aujourd'hui (une seule annonce combinée).
         available = []
         if database.get_daily(guild.id, date_str) is not None:
             available.append("🌞 Qui a écrit ça ?")
@@ -856,12 +901,14 @@ class Daily(commands.Cog):
             available.append("✍️ Devine la phrase")
         if database.get_daily(guild.id, date_str, mode=database.MODE_MEDIA) is not None:
             available.append("🖼️ Devine le média")
+        if database.get_sequence_daily(guild.id, date_str) is not None:
+            available.append("🔀 Remets dans l'ordre")
         modes_txt = " · ".join(available)
 
-        # Joueurs d'hier = union sur les trois modes (chaque membre pingé 1 fois).
+        # Joueurs d'hier = union sur les quatre modes (chaque membre pingé 1 fois).
         yesterday = (date.fromisoformat(date_str) - timedelta(days=1)).isoformat()
         played_yesterday = {}
-        for m in (database.MODE_AUTHOR, database.MODE_PHRASE, database.MODE_MEDIA):
+        for m in database.VALID_MODES:
             for r in database.get_daily_results(guild.id, yesterday, mode=m):
                 played_yesterday.setdefault(r["user_id"], None)
 
@@ -898,7 +945,7 @@ class Daily(commands.Cog):
 
     @app_commands.command(
         name="daily",
-        description="Lance l'Activity pour jouer aux trois défis du jour !",
+        description="Lance l'Activity pour jouer aux quatre défis du jour !",
     )
     @app_commands.guild_only()
     async def daily(self, interaction: discord.Interaction):
@@ -920,12 +967,13 @@ class Daily(commands.Cog):
         d = database.get_daily(guild_id, date_str)
         phrase_daily = database.get_phrase_daily(guild_id, date_str)
         media_daily = database.get_daily(guild_id, date_str, mode=database.MODE_MEDIA)
+        sequence_daily = database.get_sequence_daily(guild_id, date_str)
 
-        # Quand le pré-calcul quotidien a bien préparé les trois modes, /daily
+        # Quand le pré-calcul quotidien a bien préparé les quatre modes, /daily
         # ouvre directement l'Activity Discord. Le reste de la commande demeure
         # un fallback : il prépare les défis manquants ou fournit le lien web si
         # Discord refuse exceptionnellement le lancement.
-        if d is not None and phrase_daily is not None and media_daily is not None:
+        if all((d, phrase_daily, media_daily, sequence_daily)):
             try:
                 await interaction.response.launch_activity()
                 return
@@ -937,9 +985,9 @@ class Daily(commands.Cog):
                     user_id,
                 )
 
-        # On defer dès qu'UN des trois modes doit être tiré (pick live = 2-5 s),
+        # On defer dès qu'un mode doit être tiré (pick live = plusieurs secondes),
         # sinon l'interaction Discord (3 s) expire avant la réponse.
-        if d is None or phrase_daily is None or media_daily is None:
+        if not all((d, phrase_daily, media_daily, sequence_daily)):
             await interaction.response.defer(ephemeral=True, thinking=True)
 
         if d is None:
@@ -1006,7 +1054,17 @@ class Daily(commands.Cog):
                 interaction.guild, date_str, label="/daily"
             )
 
-        # Stats du joueur + nb de tentatives du jour, pour les deux modes.
+        sequence_error = None
+        if database.get_sequence_daily(guild_id, date_str) is None:
+            from cogs.sequence import ensure_sequence_daily_for_guild
+
+            _, sequence_error = await ensure_sequence_daily_for_guild(
+                interaction.guild,
+                date_str,
+                label="/daily",
+            )
+
+        # Stats du joueur + nombre de tentatives du jour pour les quatre modes.
         attempt = database.get_daily_attempt(
             guild_id, date_str, user_id, mode=database.MODE_AUTHOR
         )
@@ -1025,6 +1083,12 @@ class Daily(commands.Cog):
         media_streak, media_best = database.get_streak(
             guild_id, user_id, today_str=date_str, mode=database.MODE_MEDIA
         )
+        sequence_attempt = database.get_daily_attempt(
+            guild_id, date_str, user_id, mode=database.MODE_SEQUENCE
+        )
+        sequence_streak, sequence_best = database.get_streak(
+            guild_id, user_id, today_str=date_str, mode=database.MODE_SEQUENCE
+        )
         results = database.get_daily_results(guild_id, date_str, mode=database.MODE_AUTHOR)
         phrase_results = database.get_daily_results(
             guild_id, date_str, mode=database.MODE_PHRASE
@@ -1032,10 +1096,14 @@ class Daily(commands.Cog):
         media_results = database.get_daily_results(
             guild_id, date_str, mode=database.MODE_MEDIA
         )
+        sequence_results = database.get_daily_results(
+            guild_id, date_str, mode=database.MODE_SEQUENCE
+        )
         phrase_available = database.get_phrase_daily(guild_id, date_str) is not None
         media_available = database.get_daily(
             guild_id, date_str, mode=database.MODE_MEDIA
         ) is not None
+        sequence_available = database.get_sequence_daily(guild_id, date_str) is not None
 
         url = _build_daily_link(guild_id, user_id, date_str, user_name, user_avatar)
 
@@ -1044,11 +1112,18 @@ class Daily(commands.Cog):
                 return "À jouer"
             return "✅ Réussi" if a["correct"] else "❌ Raté"
 
-        playable_modes = 1 + (1 if phrase_available else 0) + (1 if media_available else 0)
+        playable_modes = (
+            1
+            + (1 if phrase_available else 0)
+            + (1 if media_available else 0)
+            + (1 if sequence_available else 0)
+        )
         played_modes = 1 if attempt is not None else 0
         if phrase_available and phrase_attempt is not None:
             played_modes += 1
         if media_available and media_attempt is not None:
+            played_modes += 1
+        if sequence_available and sequence_attempt is not None:
             played_modes += 1
         if played_modes >= playable_modes:
             embed = discord.Embed(
@@ -1060,7 +1135,7 @@ class Daily(commands.Cog):
         elif played_modes:
             embed = discord.Embed(
                 title=f"🌞 Daily du {format_date_fr(date_str)}",
-                description="Il te reste un mode à jouer sur le site.",
+                description="Il te reste au moins un mode à jouer sur le site.",
                 color=discord.Color.blurple(),
             )
             button_label = "Continuer 🎮"
@@ -1069,7 +1144,8 @@ class Daily(commands.Cog):
                 title=f"🌞 Daily du {format_date_fr(date_str)}",
                 description=(
                     "Clique sur **Ouvrir le site 🎮** : tu y trouveras les onglets "
-                    "**Qui a écrit ça ?**, **Devine la phrase** et **Devine le média**."
+                    "**Qui a écrit ça ?**, **Devine la phrase**, **Devine le média** "
+                    "et **Remets dans l'ordre**."
                 ),
                 color=discord.Color.gold(),
             )
@@ -1110,12 +1186,26 @@ class Daily(commands.Cog):
             value=media_value,
             inline=True,
         )
+        if sequence_available:
+            sequence_value = (
+                f"{_status(sequence_attempt)}\n"
+                f"{streak_emoji(sequence_streak)} streak **{sequence_streak}** · "
+                f"record **{sequence_best}**"
+            )
+        else:
+            sequence_value = sequence_error or "Indisponible pour l'instant."
+        embed.add_field(
+            name="🔀 Remets dans l'ordre",
+            value=sequence_value,
+            inline=True,
+        )
         embed.add_field(
             name="👥 Aujourd'hui",
             value=(
                 f"Qui a écrit ça ? : **{len(results)}** · "
                 f"Phrase : **{len(phrase_results)}** · "
-                f"Média : **{len(media_results)}** joueur(s)"
+                f"Média : **{len(media_results)}** · "
+                f"Ordre : **{len(sequence_results)}** joueur(s)"
             ),
             inline=False,
         )
@@ -1152,11 +1242,12 @@ class Daily(commands.Cog):
             title=f"📊 Stats — {name}",
             color=discord.Color.blurple(),
         )
-        # Une ligne par mode : Qui a écrit ça ?, Devine la phrase, Devine le média.
+        # Une ligne par mode.
         for mode, label in (
             (database.MODE_AUTHOR, "🌞 Qui a écrit ça ?"),
             (database.MODE_PHRASE, "✍️ Devine la phrase"),
             (database.MODE_MEDIA, "🖼️ Devine le média"),
+            (database.MODE_SEQUENCE, "🔀 Remets dans l'ordre"),
         ):
             cur, bst = database.get_streak(guild_id, user_id, today_str=today, mode=mode)
             corr, tot = database.get_user_score(guild_id, user_id, mode=mode)
@@ -1177,7 +1268,7 @@ class Daily(commands.Cog):
 
     @app_commands.command(
         name="classement",
-        description="Classement allégé : victoires, ratio, streak (Qui a écrit ça ? / la phrase / le média).",
+        description="Classement allégé : points, ratio et streak pour les quatre modes.",
     )
     @app_commands.guild_only()
     async def classement(self, interaction: discord.Interaction):
@@ -1193,7 +1284,7 @@ class Daily(commands.Cog):
 
     @app_commands.command(
         name="classement-complet",
-        description="Classement complet : toutes les stats (Qui a écrit ça ? / la phrase / le média).",
+        description="Classement complet : toutes les stats pour les quatre modes.",
     )
     @app_commands.guild_only()
     async def classement_complet(self, interaction: discord.Interaction):
@@ -1209,7 +1300,7 @@ class Daily(commands.Cog):
 
     @app_commands.command(
         name="daily-resultats",
-        description="Tentatives du jour (4 onglets : Qui a écrit ça ? / la phrase / le média / Général).",
+        description="Tentatives du jour par mode, plus le récapitulatif général.",
     )
     @app_commands.guild_only()
     async def daily_results(self, interaction: discord.Interaction):

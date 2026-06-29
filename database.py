@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS daily_lock (
 
 -- Heure de départ serveur, PAR MODE, pour mesurer le temps de réponse de façon
 -- non-truquable (le client ne peut pas envoyer un faux time_taken_ms). Le verrou
--- daily_lock ne couvre que "Qui a écrit ça ?" (author) ; cette table couvre les 3 modes.
+-- daily_lock ne couvre que "Qui a écrit ça ?" (author) ; cette table couvre tous les modes.
 CREATE TABLE IF NOT EXISTS daily_start (
     guild_id   INTEGER NOT NULL,
     date       TEXT    NOT NULL,
@@ -273,6 +273,73 @@ CREATE TABLE IF NOT EXISTS media_daily_announced (
     announced_at TEXT    NOT NULL,
     PRIMARY KEY (guild_id, date)
 );
+
+-- =====================================================================
+-- MODE "remets dans l'ordre" : cinq messages consécutifs d'un salon.
+-- Le classement est calculé et conservé, mais peut rester masqué côté UI.
+-- =====================================================================
+
+CREATE TABLE IF NOT EXISTS sequence_daily (
+    guild_id        INTEGER NOT NULL,
+    date            TEXT    NOT NULL,
+    channel_id      INTEGER NOT NULL,
+    first_message_id INTEGER NOT NULL,
+    messages        TEXT    NOT NULL,  -- JSON, ordre chronologique canonique
+    PRIMARY KEY (guild_id, date)
+);
+
+CREATE TABLE IF NOT EXISTS sequence_daily_attempts (
+    guild_id      INTEGER NOT NULL,
+    date          TEXT    NOT NULL,
+    user_id       INTEGER NOT NULL,
+    user_name     TEXT    NOT NULL,
+    guessed_id    INTEGER NOT NULL,    -- nombre de positions exactes (0..5)
+    guessed_order TEXT    NOT NULL DEFAULT '[]',
+    correct       INTEGER NOT NULL,
+    answered_at   TEXT    NOT NULL,
+    time_taken_ms INTEGER,
+    difficulty    TEXT    NOT NULL DEFAULT 'normal',
+    PRIMARY KEY (guild_id, date, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS sequence_streaks (
+    guild_id          INTEGER NOT NULL,
+    user_id           INTEGER NOT NULL,
+    current_streak    INTEGER NOT NULL DEFAULT 0,
+    best_streak       INTEGER NOT NULL DEFAULT 0,
+    last_correct_date TEXT,
+    last_broken_streak INTEGER NOT NULL DEFAULT 0,
+    last_broken_date TEXT,
+    current_loss_streak INTEGER NOT NULL DEFAULT 0,
+    last_loss_date TEXT,
+    PRIMARY KEY (guild_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS sequence_scores (
+    guild_id INTEGER NOT NULL,
+    user_id  INTEGER NOT NULL,
+    name     TEXT    NOT NULL,
+    correct  INTEGER NOT NULL DEFAULT 0,
+    total    INTEGER NOT NULL DEFAULT 0,
+    points   INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (guild_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS sequence_recent_picks (
+    guild_id   INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    picked_at  TEXT    NOT NULL,
+    PRIMARY KEY (guild_id, message_id)
+);
+CREATE INDEX IF NOT EXISTS idx_sequence_picks
+    ON sequence_recent_picks(guild_id, picked_at DESC);
+
+CREATE TABLE IF NOT EXISTS sequence_daily_announced (
+    guild_id     INTEGER NOT NULL,
+    date         TEXT    NOT NULL,
+    announced_at TEXT    NOT NULL,
+    PRIMARY KEY (guild_id, date)
+);
 """
 
 
@@ -299,7 +366,8 @@ def get_conn() -> sqlite3.Connection:
 MODE_AUTHOR = "author"
 MODE_PHRASE = "phrase"
 MODE_MEDIA = "media"
-VALID_MODES = (MODE_AUTHOR, MODE_PHRASE, MODE_MEDIA)
+MODE_SEQUENCE = "sequence"
+VALID_MODES = (MODE_AUTHOR, MODE_PHRASE, MODE_MEDIA, MODE_SEQUENCE)
 
 
 def _tbl(mode: str, base: str) -> str:
@@ -311,7 +379,7 @@ def _tbl(mode: str, base: str) -> str:
     """
     if mode == MODE_AUTHOR:
         return base
-    if mode in (MODE_PHRASE, MODE_MEDIA):
+    if mode in (MODE_PHRASE, MODE_MEDIA, MODE_SEQUENCE):
         return f"{mode}_{base}"
     raise ValueError(f"mode inconnu: {mode!r}")
 
@@ -348,7 +416,7 @@ def init_db() -> None:
     # passées étaient en Normal (+1), donc points == correct. On ne backfill que
     # les lignes encore "vierges" (points=0 alors qu'il y a des victoires), sans
     # écraser de vrais points déjà cumulés en Hardcore.
-    for sc in ("scores", "phrase_scores", "media_scores"):
+    for sc in ("scores", "phrase_scores", "media_scores", "sequence_scores"):
         conn.execute(
             f"UPDATE {sc} SET points = correct WHERE points = 0 AND correct > 0"
         )
@@ -359,6 +427,10 @@ def init_db() -> None:
     # daily_attempts, identique à ce que produit update_streak au fil de l'eau.
     for m in VALID_MODES:
         recompute_loss_streaks(mode=m)
+    # Le mode séquence attribue un point par message bien placé (0..5).
+    # Rejouer ses tentatives au démarrage migre aussi les scores créés avant
+    # l'introduction des points partiels.
+    recompute_player_stats(mode=MODE_SEQUENCE)
 
     # Auto-réparation des tentatives marquées fausses à tort (ancien bug : perte
     # de précision JS sur les snowflakes Discord → la bonne réponse comptait faux).
@@ -432,8 +504,10 @@ def _recompute_player_stats_in_transaction(
     da_t = _tbl(mode, "daily_attempts")
     sc_t = _tbl(mode, "scores")
     st_t = _tbl(mode, "streaks")
+    guessed_column = ", guessed_id" if mode == MODE_SEQUENCE else ""
     rows = conn.execute(
-        f"SELECT guild_id, user_id, user_name, date, correct, difficulty FROM {da_t} "
+        f"SELECT guild_id, user_id, user_name, date, correct, difficulty"
+        f"{guessed_column} FROM {da_t} "
         "ORDER BY guild_id, user_id, date ASC"
     ).fetchall()
 
@@ -451,9 +525,12 @@ def _recompute_player_stats_in_transaction(
             d = date.fromisoformat(a["date"])
             yest = (d - timedelta(days=1)).isoformat()
             total += 1
+            if mode == MODE_SEQUENCE:
+                points += max(0, min(int(a["guessed_id"]), 5))
             if a["correct"]:
                 correct += 1
-                points += 2 if a["difficulty"] == "hardcore" else 1
+                if mode != MODE_SEQUENCE:
+                    points += 2 if a["difficulty"] == "hardcore" else 1
                 cur = cur + 1 if last_correct == yest else 1
                 last_correct = a["date"]
                 loss = 0
@@ -517,9 +594,11 @@ def get_daily_dates(guild_id: int) -> List[str]:
         SELECT date FROM phrase_daily_attempts WHERE guild_id = ?
         UNION
         SELECT date FROM media_daily_attempts WHERE guild_id = ?
+        UNION
+        SELECT date FROM sequence_daily_attempts WHERE guild_id = ?
         ORDER BY date DESC
         """,
-        (guild_id, guild_id, guild_id),
+        (guild_id, guild_id, guild_id, guild_id),
     ).fetchall()
     return [row["date"] for row in rows]
 
@@ -542,6 +621,7 @@ def correct_daily_attempt(
         MODE_AUTHOR: ("daily", "author_id"),
         MODE_PHRASE: ("phrase_daily", "correct_message_id"),
         MODE_MEDIA: ("media_daily", "author_id"),
+        MODE_SEQUENCE: ("sequence_daily", None),
     }
     challenge_table, correct_column = specs.get(mode, (None, None))
     if challenge_table is None:
@@ -560,11 +640,18 @@ def correct_daily_attempt(
             "WHERE guild_id = ? AND date = ? AND user_id = ?",
             (guild_id, date_str, user_id),
         ).fetchone()
-        challenge = conn.execute(
-            f"SELECT {correct_column} AS correct_id FROM {challenge_table} "
-            "WHERE guild_id = ? AND date = ?",
-            (guild_id, date_str),
-        ).fetchone()
+        if mode == MODE_SEQUENCE:
+            challenge = conn.execute(
+                "SELECT 5 AS correct_id FROM sequence_daily "
+                "WHERE guild_id = ? AND date = ?",
+                (guild_id, date_str),
+            ).fetchone()
+        else:
+            challenge = conn.execute(
+                f"SELECT {correct_column} AS correct_id FROM {challenge_table} "
+                "WHERE guild_id = ? AND date = ?",
+                (guild_id, date_str),
+            ).fetchone()
         if attempt is None or challenge is None:
             conn.rollback()
             return None
@@ -1117,12 +1204,19 @@ def search_members_ranked(guild_id: int, query: str, limit: int = 12) -> List[Di
 def record_answer(
     guild_id: int, user_id: int, name: str, correct: bool,
     mode: str = MODE_AUTHOR, points: int = 1,
+    earned_points: Optional[int] = None,
 ) -> None:
-    """Met à jour le score. `points` = points gagnés si `correct` (Normal 1,
-    Hardcore 2). `correct`/`total` comptent toujours victoires/parties."""
+    """Met à jour le score.
+
+    `points` est attribué uniquement en cas de victoire (Normal 1, Hardcore 2).
+    `earned_points` permet aux modes à score partiel d'imposer un gain indépendant
+    du résultat parfait. `correct`/`total` comptent toujours victoires/parties.
+    """
     tbl = _tbl(mode, "scores")
     win = 1 if correct else 0
-    pts = points if correct else 0
+    pts = max(0, int(earned_points)) if earned_points is not None else (
+        points if correct else 0
+    )
     conn = get_conn()
     conn.execute(
         f"INSERT INTO {tbl} (guild_id, user_id, name, correct, total, points) "
@@ -1456,6 +1550,50 @@ def create_phrase_daily_if_absent(
     return cur.rowcount > 0
 
 
+# --- Daily mode "sequence" -----------------------------------------------
+
+def get_sequence_daily(guild_id: int, date_str: str) -> Optional[Dict]:
+    """Renvoie les cinq messages dans leur ordre chronologique canonique."""
+    row = get_conn().execute(
+        "SELECT channel_id, first_message_id, messages "
+        "FROM sequence_daily WHERE guild_id = ? AND date = ?",
+        (guild_id, date_str),
+    ).fetchone()
+    if row is None:
+        return None
+    return {
+        "channel_id": row["channel_id"],
+        "first_message_id": row["first_message_id"],
+        "messages": json.loads(row["messages"]),
+    }
+
+
+def create_sequence_daily_if_absent(
+    guild_id: int,
+    date_str: str,
+    channel_id: int,
+    messages: List[Dict],
+) -> bool:
+    """Crée un défi de cinq messages, déjà triés chronologiquement."""
+    if len(messages) != 5:
+        raise ValueError("un défi sequence doit contenir exactement 5 messages")
+    conn = get_conn()
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO sequence_daily "
+        "(guild_id, date, channel_id, first_message_id, messages) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (
+            guild_id,
+            date_str,
+            channel_id,
+            int(messages[0]["id"]),
+            json.dumps(messages, ensure_ascii=False),
+        ),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
 def is_daily_announced(guild_id: int, date_str: str, mode: str = MODE_AUTHOR) -> bool:
     """True si l'annonce du daily a déjà été envoyée pour ce jour."""
     tbl = _tbl(mode, "daily_announced")
@@ -1483,14 +1621,16 @@ def get_daily_attempt(
     guild_id: int, date_str: str, user_id: int, mode: str = MODE_AUTHOR
 ) -> Optional[Dict]:
     tbl = _tbl(mode, "daily_attempts")
+    extra_column = ", guessed_order" if mode == MODE_SEQUENCE else ""
     row = get_conn().execute(
-        f"SELECT user_name, guessed_id, correct, answered_at, time_taken_ms, difficulty "
+        f"SELECT user_name, guessed_id, correct, answered_at, time_taken_ms, "
+        f"difficulty{extra_column} "
         f"FROM {tbl} WHERE guild_id = ? AND date = ? AND user_id = ?",
         (guild_id, date_str, user_id),
     ).fetchone()
     if row is None:
         return None
-    return {
+    attempt = {
         "user_name": row["user_name"],
         "guessed_id": row["guessed_id"],
         "correct": bool(row["correct"]),
@@ -1498,6 +1638,9 @@ def get_daily_attempt(
         "time_taken_ms": row["time_taken_ms"],
         "difficulty": row["difficulty"] if "difficulty" in row.keys() else "normal",
     }
+    if mode == MODE_SEQUENCE:
+        attempt["guessed_order"] = json.loads(row["guessed_order"] or "[]")
+    return attempt
 
 
 def record_daily_attempt(
@@ -1528,6 +1671,40 @@ def record_daily_attempt(
         "VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?, ?)",
         (guild_id, date_str, user_id, user_name, guessed_id,
          1 if correct else 0, time_taken_ms, difficulty),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def record_sequence_attempt(
+    guild_id: int,
+    date_str: str,
+    user_id: int,
+    user_name: str,
+    guessed_order: List[int],
+    exact_positions: int,
+    correct: bool,
+    time_taken_ms: Optional[int] = None,
+) -> bool:
+    """Enregistre l'ordre proposé sans le réduire à un simple booléen."""
+    if time_taken_ms is not None:
+        time_taken_ms = max(0, min(int(time_taken_ms), 24 * 60 * 60 * 1000))
+    conn = get_conn()
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO sequence_daily_attempts "
+        "(guild_id, date, user_id, user_name, guessed_id, guessed_order, "
+        " correct, answered_at, time_taken_ms, difficulty) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, 'normal')",
+        (
+            guild_id,
+            date_str,
+            user_id,
+            user_name,
+            max(0, min(int(exact_positions), 5)),
+            json.dumps([str(message_id) for message_id in guessed_order]),
+            1 if correct else 0,
+            time_taken_ms,
+        ),
     )
     conn.commit()
     return cur.rowcount > 0

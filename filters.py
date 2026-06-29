@@ -131,3 +131,24 @@ def is_eligible(message, min_chars: int, min_words: int) -> bool:
         return False
 
     return True
+
+
+def is_sequence_eligible(message, min_chars: int, min_words: int) -> bool:
+    """Éligibilité du mode conversation, qui autorise une vraie pièce jointe média."""
+    if getattr(message.author, "bot", False):
+        return False
+    if getattr(message, "webhook_id", None):
+        return False
+    if is_deleted_user(message.author):
+        return False
+
+    media_url = media_attachment_url(message)
+    if media_url is None:
+        return is_eligible(message, min_chars, min_words)
+
+    content = (message.content or "").strip()
+    if content.startswith(COMMAND_PREFIXES):
+        return False
+    if URL_RE.search(content) or INVITE_RE.search(content):
+        return False
+    return True

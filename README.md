@@ -6,10 +6,15 @@ classements et une interface jouable directement dans une Discord Activity.
 
 ## Fonctionnalités
 
-- Trois modes quotidiens :
+- Quatre modes quotidiens :
   - **Qui a écrit ça ?** : retrouver l'auteur d'un message ;
   - **Devine la phrase** : retrouver la phrase écrite par un membre donné ;
-  - **Devine le média** : retrouver l'auteur d'une image, d'un GIF ou d'une vidéo.
+  - **Devine le média** : retrouver l'auteur d'une image, d'un GIF ou d'une vidéo ;
+  - **Remets dans l'ordre** : replacer cinq messages d'une conversation dans leur
+    ordre chronologique, y compris lorsqu'ils contiennent un média.
+- Le mode conversation conserve séparément l'ordre proposé et le bon ordre après
+  validation. Il attribue de 0 à 5 points selon les positions exactes ; seule une
+  partie parfaite compte comme victoire et prolonge la série.
 - Mode Hardcore pour les modes auteur et média. Le média accorde 25 secondes pour
   une image, 40 secondes pour un GIF, ou la durée de la vidéo + 25 secondes, avec
   un plafond total de 2 min 30.
@@ -20,8 +25,10 @@ classements et une interface jouable directement dans une Discord Activity.
 - Contexte de conversation révélé uniquement après la réponse.
 - Tirage automatique des défis à minuit.
 - Correction sécurisée des tentatives par les administrateurs autorisés.
-- Progression anti-spoil des participants sur les trois modes, classement à gauche
+- Progression anti-spoil des participants sur les quatre modes, classement à gauche
   et suivi en direct à droite.
+- Le direct affiche `×`, `1`, `2`, `3`, `4` ou `✓` pour le mode conversation. Le
+  classement indique aussi les joueurs ayant participé aujourd'hui.
 - État live initial rendu immédiatement, puis mise à jour par SSE avec polling
   automatique si le proxy Discord bloque le flux.
 - Bouton persistant dans l'annonce quotidienne pour lancer directement l'Activity.
@@ -34,7 +41,7 @@ classements et une interface jouable directement dans une Discord Activity.
 | Commande | Description |
 |---|---|
 | `/daily` | Lance l'Activity ou fournit le lien web de secours. |
-| `/mes-stats` | Affiche les statistiques personnelles des trois modes. |
+| `/mes-stats` | Affiche les statistiques personnelles des quatre modes. |
 | `/classement` | Affiche le classement synthétique. |
 | `/classement-complet` | Affiche le classement détaillé. |
 | `/daily-resultats` | Affiche les tentatives du jour. |
@@ -48,7 +55,7 @@ classements et une interface jouable directement dans une Discord Activity.
 
 ```text
 activity/                    Client Vite pour la Discord Activity
-cogs/                        Commandes et moteurs des trois modes
+cogs/                        Commandes et moteurs des quatre modes
 scripts/create_entry_point.py
 tests/                       Tests unitaires et d'intégration
 webapp/                      Serveur Flask, templates et ressources web

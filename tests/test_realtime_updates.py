@@ -67,6 +67,24 @@ class RealtimeUpdatesTests(unittest.TestCase):
             " 'https://cdn.discordapp.com/attachments/2/3/video.mp4', ?)",
             (self.GUILD_ID, self.date, self.CORRECT_ID, options),
         )
+        sequence_messages = json.dumps([
+            {
+                "id": str(message_id),
+                "author_id": str(self.CORRECT_ID),
+                "author_name": "Bonne réponse",
+                "content": f"Message {message_id}",
+                "has_media": False,
+                "media_url": "",
+                "media_is_video": False,
+            }
+            for message_id in range(500, 505)
+        ])
+        conn.execute(
+            "INSERT INTO sequence_daily "
+            "(guild_id, date, channel_id, first_message_id, messages) "
+            "VALUES (?, ?, 2, 500, ?)",
+            (self.GUILD_ID, self.date, sequence_messages),
+        )
         conn.commit()
 
         self.app = server.create_app()
@@ -98,21 +116,40 @@ class RealtimeUpdatesTests(unittest.TestCase):
         )
 
     def _record_attempt(self, user_id, guessed_id=None, mode=database.MODE_AUTHOR):
-        correct_id = 300 if mode == database.MODE_PHRASE else self.CORRECT_ID
+        correct_id = (
+            5
+            if mode == database.MODE_SEQUENCE
+            else 300 if mode == database.MODE_PHRASE else self.CORRECT_ID
+        )
         guessed_id = correct_id if guessed_id is None else guessed_id
         is_correct = guessed_id == correct_id
         name = f"Joueur {user_id}"
         database.upsert_user(self.GUILD_ID, user_id, name, "")
-        self.assertTrue(database.record_daily_attempt(
-            self.GUILD_ID,
-            self.date,
-            user_id,
-            name,
-            guessed_id,
-            is_correct,
-            time_taken_ms=1200,
-            mode=mode,
-        ))
+        if mode == database.MODE_SEQUENCE:
+            order = list(range(500, 505))
+            if not is_correct:
+                order.reverse()
+            self.assertTrue(database.record_sequence_attempt(
+                self.GUILD_ID,
+                self.date,
+                user_id,
+                name,
+                order,
+                guessed_id,
+                is_correct,
+                time_taken_ms=1200,
+            ))
+        else:
+            self.assertTrue(database.record_daily_attempt(
+                self.GUILD_ID,
+                self.date,
+                user_id,
+                name,
+                guessed_id,
+                is_correct,
+                time_taken_ms=1200,
+                mode=mode,
+            ))
         database.update_streak(
             self.GUILD_ID, user_id, self.date, is_correct, mode=mode
         )
@@ -216,9 +253,11 @@ class RealtimeUpdatesTests(unittest.TestCase):
         self._record_attempt(20, self.WRONG_ID)
         self._record_attempt(20, 400, mode=database.MODE_PHRASE)
         self._record_attempt(20, self.WRONG_ID, mode=database.MODE_MEDIA)
+        self._record_attempt(20, 1, mode=database.MODE_SEQUENCE)
         self._record_attempt(10)
         self._record_attempt(10, mode=database.MODE_PHRASE)
         self._record_attempt(10, mode=database.MODE_MEDIA)
+        self._record_attempt(10, mode=database.MODE_SEQUENCE)
 
         progress = server._daily_progress_view(
             self.GUILD_ID,
@@ -234,6 +273,11 @@ class RealtimeUpdatesTests(unittest.TestCase):
         self.assertEqual(details[database.MODE_AUTHOR]["guess"], "Mauvaise réponse")
         self.assertEqual(details[database.MODE_PHRASE]["guess"], "Une autre phrase")
         self.assertEqual(details[database.MODE_MEDIA]["guess"], "Mauvaise réponse")
+        self.assertEqual(
+            details[database.MODE_SEQUENCE]["guess"],
+            "1/5 message bien placé",
+        )
+        self.assertEqual(details[database.MODE_SEQUENCE]["score"], 1)
         self.assertTrue(all(detail["time"] == "1.200s" for detail in details.values()))
 
     def test_start_marks_player_as_playing(self):

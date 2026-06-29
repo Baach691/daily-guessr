@@ -56,7 +56,7 @@ async function main() {
       activity: {
         type: 0,
         details: 'Daily en cours',
-        state: 'Trois modes à compléter',
+        state: 'Quatre modes à compléter',
         assets: {
           large_image: '1',
           large_text: 'Daily Guessr',

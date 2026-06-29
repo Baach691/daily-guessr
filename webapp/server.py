@@ -8,11 +8,13 @@ Les liens sont signés HMAC : impossible de tricher sur l'identité.
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import math
 import os
 import queue
+import random
 import threading
 import time
 import urllib.error
@@ -58,6 +60,7 @@ DAILY_MODE_SPECS = (
     (database.MODE_AUTHOR, "🌞", "Qui a écrit ça ?"),
     (database.MODE_PHRASE, "✍️", "Devine la phrase"),
     (database.MODE_MEDIA, "🖼️", "Devine le média"),
+    (database.MODE_SEQUENCE, "🔀", "Remets dans l'ordre"),
 )
 
 
@@ -285,10 +288,18 @@ def _is_discord_attachment_url(url: str) -> bool:
 # --- Sidebar : classement live --------------------------------------------
 
 def _leaderboard_view(
-    guild_id: int, mode: str, me_user_id: int, top: Optional[int] = None
+    guild_id: int,
+    mode: str,
+    me_user_id: int,
+    top: Optional[int] = None,
+    date_str: Optional[str] = None,
 ) -> list:
     """Classement du mode courant prêt à afficher dans la sidebar."""
     rows = database.get_leaderboard(guild_id, limit=top, mode=mode)
+    played_today = {
+        int(result["user_id"])
+        for result in database.get_daily_results(guild_id, date_str, mode=mode)
+    } if date_str else set()
     out = []
     for i, r in enumerate(rows, 1):
         out.append({
@@ -301,6 +312,7 @@ def _leaderboard_view(
             "current_streak": r["current_streak"],
             "current_loss_streak": r.get("current_loss_streak", 0) or 0,
             "is_me": r["user_id"] == me_user_id,
+            "played_today": r["user_id"] in played_today,
         })
     return out
 
@@ -314,7 +326,7 @@ def _payload_mode(payload: dict) -> str:
 
 
 def _load_challenge(guild_id: int, today: str, mode: str) -> Optional[dict]:
-    """Charge le défi du jour, normalisé pour un rendu commun aux 2 modes.
+    """Charge le défi du jour, normalisé pour le rendu commun aux quatre modes.
 
     Champs renvoyés :
       correct_id      : id de la bonne option (auteur ou message selon le mode)
@@ -327,6 +339,34 @@ def _load_challenge(guild_id: int, today: str, mode: str) -> Optional[dict]:
       channel_id / message_id : pour le contexte au reveal
       content_reveal  : texte de la bonne réponse (message ou phrase)
     """
+    if mode == database.MODE_SEQUENCE:
+        daily = database.get_sequence_daily(guild_id, today)
+        if daily is None:
+            return None
+        return {
+            "correct_id": 5,
+            "correct_name": "les 5 messages dans le bon ordre",
+            "options": [
+                (1, "1/5 bien placé"),
+                (2, "2/5 bien placés"),
+                (3, "3/5 bien placés"),
+                (4, "4/5 bien placés"),
+                (5, "Ordre correct"),
+            ],
+            "message_content": None,
+            "is_media": False,
+            "media_url": "",
+            "media_is_video": False,
+            "media_is_gif": False,
+            "is_sequence": True,
+            "sequence_messages": daily["messages"],
+            "subject_id": None,
+            "subject_name": None,
+            "subject_avatar_url": "",
+            "channel_id": daily["channel_id"],
+            "message_id": daily["first_message_id"],
+            "content_reveal": "Conversation remise dans l'ordre",
+        }
     if mode == database.MODE_PHRASE:
         d = database.get_phrase_daily(guild_id, today)
         if d is None:
@@ -340,6 +380,7 @@ def _load_challenge(guild_id: int, today: str, mode: str) -> Optional[dict]:
             "media_url": "",
             "media_is_video": False,
             "media_is_gif": False,
+            "is_sequence": False,
             "subject_id": d["author_id"],
             "subject_name": d["author_name"],
             "subject_avatar_url": avatar_for_user(guild_id, d["author_id"]),
@@ -361,6 +402,7 @@ def _load_challenge(guild_id: int, today: str, mode: str) -> Optional[dict]:
         "media_url": d["content"] if is_media else "",
         "media_is_video": _is_video_url(d["content"]) if is_media else False,
         "media_is_gif": _is_gif_url(d["content"]) if is_media else False,
+        "is_sequence": False,
         "subject_id": None,
         "subject_name": None,
         "subject_avatar_url": "",
@@ -430,6 +472,64 @@ def _options_view(guild_id: int, options: list, mode: str) -> list:
     return out
 
 
+def _sequence_messages_view(
+    guild_id: int,
+    date_str: str,
+    user_id: int,
+    token: str,
+    challenge: dict,
+    order_ids: Optional[list] = None,
+    *,
+    shuffled: bool = False,
+) -> list:
+    """Décore les messages dans l'ordre demandé, avec URLs média signées."""
+    canonical = [dict(message) for message in challenge["sequence_messages"]]
+    by_id = {str(message["id"]): message for message in canonical}
+    if order_ids is not None:
+        ordered = [
+            by_id[str(message_id)]
+            for message_id in order_ids
+            if str(message_id) in by_id
+        ]
+    elif shuffled:
+        ordered = list(canonical)
+        seed_material = (
+            f"{config.WEBAPP_SECRET}|{guild_id}|{date_str}|{user_id}|sequence"
+        )
+        seed = int.from_bytes(
+            hashlib.sha256(seed_material.encode("utf-8")).digest()[:8],
+            "big",
+        )
+        random.Random(seed).shuffle(ordered)
+        if [str(message["id"]) for message in ordered] == list(by_id):
+            ordered[-2], ordered[-1] = ordered[-1], ordered[-2]
+    else:
+        ordered = canonical
+
+    out = []
+    for position, message in enumerate(ordered, 1):
+        author_id = int(message["author_id"])
+        item = {
+            "id": str(message["id"]),
+            "position": position,
+            "author_name": message["author_name"],
+            "author_avatar_url": avatar_for_user(guild_id, author_id),
+            "content": message.get("content", ""),
+            "has_media": bool(message.get("has_media")),
+            "media_is_video": bool(message.get("media_is_video")),
+            "media_url": "",
+            "position_correct": (
+                str(message["id"]) == str(canonical[position - 1]["id"])
+            ),
+        }
+        if item["has_media"]:
+            item["media_url"] = (
+                f"/daily/sequence/media?t={token}&mid={item['id']}"
+            )
+        out.append(item)
+    return out
+
+
 def _option_stats(guild_id: int, today: str, mode: str, options: list) -> dict:
     """% de joueurs ayant choisi chaque proposition (pour le reveal).
 
@@ -446,7 +546,12 @@ def _option_stats(guild_id: int, today: str, mode: str, options: list) -> dict:
     return stats
 
 
-def _attach_guess_labels(guild_id: int, options: list, results: list) -> list:
+def _attach_guess_labels(
+    guild_id: int,
+    options: list,
+    results: list,
+    mode: str,
+) -> list:
     """Ajoute à chaque tentative FAUSSE le NOM de la personne devinée (Normal comme
     Hardcore) — site uniquement, jamais dans les embeds Discord. On affiche le nom
     complet (pas un numéro) pour éviter d'avoir à remonter voir les propositions.
@@ -459,6 +564,10 @@ def _attach_guess_labels(guild_id: int, options: list, results: list) -> list:
             r["guess_label"] = None
             continue
         gid = r.get("guessed_id")
+        if mode == database.MODE_SEQUENCE:
+            plural = "" if gid == 1 else "s"
+            r["guess_label"] = f"{gid}/5 message{plural} bien placé{plural}"
+            continue
         name = name_by_id.get(gid)
         if not name and gid:
             name = (database.get_user(guild_id, gid) or {}).get("name")
@@ -540,12 +649,16 @@ def _daily_progress_view(
                         guess_label = (
                             database.get_user(guild_id, guessed_id) or {}
                         ).get("name")
+                    if mode == database.MODE_SEQUENCE:
+                        plural = "" if guessed_id == 1 else "s"
+                        guess_label = f"{guessed_id}/5 message{plural} bien placé{plural}"
                     details[mode] = {
                         "guess": guess_label or "Réponse inconnue",
                         "time": (
                             format_duration_ms(attempt.get("time_taken_ms"))
                             or "Temps inconnu"
                         ),
+                        "score": guessed_id if mode == database.MODE_SEQUENCE else None,
                     }
                 else:
                     statuses[mode] = "complete"
@@ -625,7 +738,7 @@ def _realtime_state(
     results = _enrich_results(
         database.get_daily_results(guild_id, date_str, mode=mode)
     )
-    _attach_guess_labels(guild_id, challenge["options"], results)
+    _attach_guess_labels(guild_id, challenge["options"], results, mode)
     results_view = [
         {
             "user_id": result["user_id"],
@@ -641,7 +754,12 @@ def _realtime_state(
     return {
         "unlocked": True,
         "results": results_view,
-        "leaderboard": _leaderboard_view(guild_id, mode, user_id),
+        "leaderboard": _leaderboard_view(
+            guild_id,
+            mode,
+            user_id,
+            date_str=date_str,
+        ),
         "progress": progress,
         "participant_count": len(progress),
     }
@@ -675,7 +793,7 @@ def _mode_tabs(
     active_mode: str,
     activity: bool = False,
 ) -> list:
-    """Onglets de navigation entre les trois modes du daily."""
+    """Onglets de navigation entre les modes du daily."""
     tabs = []
     for mode, icon, label in DAILY_MODE_SPECS:
         available = _load_challenge(guild_id, today, mode) is not None
@@ -1011,7 +1129,7 @@ def create_app(bot=None) -> Flask:
         results = database.get_daily_results(guild_id, today, mode=mode)
 
         # Hardcore : disponible sur "Qui a écrit ça ?" ET "Devine le média" (réponse =
-        # un auteur dans les deux cas). Verrou de difficulté (par mode) une fois
+        # un auteur dans les modes concernés). Verrou de difficulté (par mode) une fois
         # "Jouer" cliqué (sinon le joueur reste libre de choisir).
         hardcore_enabled = mode in (database.MODE_AUTHOR, database.MODE_MEDIA)
         stored_difficulty = database.get_daily_difficulty(
@@ -1044,16 +1162,48 @@ def create_app(bot=None) -> Flask:
             stats = _option_stats(guild_id, today, mode, ch["options"])
             for o in options_view:
                 o["pct"] = stats.get(str(o["id"]), {}).get("pct")
+        sequence_messages = []
+        sequence_correct_messages = []
+        if mode == database.MODE_SEQUENCE:
+            if attempt is None:
+                sequence_messages = _sequence_messages_view(
+                    guild_id,
+                    today,
+                    user_id,
+                    token,
+                    ch,
+                    shuffled=True,
+                )
+            else:
+                sequence_messages = _sequence_messages_view(
+                    guild_id,
+                    today,
+                    user_id,
+                    token,
+                    ch,
+                    order_ids=attempt.get("guessed_order") or [],
+                )
+                sequence_correct_messages = _sequence_messages_view(
+                    guild_id,
+                    today,
+                    user_id,
+                    token,
+                    ch,
+                )
 
         _titles = {
             database.MODE_PHRASE: "Devine la phrase",
             database.MODE_MEDIA: "Devine le média",
+            database.MODE_SEQUENCE: "Remets la conversation dans l'ordre",
         }
         return render_template(
             "daily.html",
             mode=mode,
             is_phrase=(mode == database.MODE_PHRASE),
             is_media=ch.get("is_media", False),
+            is_sequence=ch.get("is_sequence", False),
+            sequence_messages=sequence_messages,
+            sequence_correct_messages=sequence_correct_messages,
             media_url=(
                 f"/daily/media?t={token}" if ch.get("is_media", False) else ""
             ),
@@ -1086,8 +1236,16 @@ def create_app(bot=None) -> Flask:
             # laissent deviner si le défi est piégeux). Rempli par le JS après
             # la réponse. On n'envoie donc rien dans le HTML source avant de jouer.
             leaderboard=(
-                _leaderboard_view(guild_id, mode, user_id) if attempt else []
+                _leaderboard_view(
+                    guild_id,
+                    mode,
+                    user_id,
+                    date_str=today,
+                )
+                if attempt
+                else []
             ),
+            leaderboard_hidden=False,
             mode_tabs=_mode_tabs(
                 guild_id,
                 today,
@@ -1168,10 +1326,55 @@ def create_app(bot=None) -> Flask:
         if daily is None:
             return jsonify({"error": "no_daily"}), 404
 
+        return _serve_discord_media(
+            daily["channel_id"],
+            daily["message_id"],
+            daily["content"],
+        )
+
+    @app.route("/daily/sequence/media")
+    def daily_sequence_media():
+        """Diffuse une pièce jointe appartenant aux cinq messages du défi."""
+        token = request.args.get("t", "")
+        payload = tokens.verify_token(token, config.WEBAPP_SECRET)
+        if payload is None or payload.get("d") != today_str():
+            return jsonify({"error": "invalid_token"}), 403
+        if _payload_mode(payload) != database.MODE_SEQUENCE:
+            return jsonify({"error": "not_sequence_mode"}), 403
+        try:
+            message_id = int(request.args.get("mid", ""))
+        except (TypeError, ValueError):
+            return jsonify({"error": "bad_message_id"}), 400
+
+        daily = database.get_sequence_daily(int(payload["g"]), today_str())
+        if daily is None:
+            return jsonify({"error": "no_daily"}), 404
+        message = next(
+            (
+                item
+                for item in daily["messages"]
+                if int(item["id"]) == message_id and item.get("has_media")
+            ),
+            None,
+        )
+        if message is None:
+            return jsonify({"error": "media_not_in_daily"}), 404
+        return _serve_discord_media(
+            daily["channel_id"],
+            message_id,
+            message.get("media_url", ""),
+        )
+
+    def _serve_discord_media(
+        channel_id: int,
+        message_id: int,
+        fallback_url: str,
+    ):
+        """Proxy borné d'une pièce jointe Discord avec support des vidéos Range."""
         bot = current_app.config.get("BOT")
         media_url = fetch_current_media_url(
-            bot, daily["channel_id"], daily["message_id"]
-        ) or daily["content"]
+            bot, channel_id, message_id
+        ) or fallback_url
         if not _is_discord_attachment_url(media_url):
             log.error("URL média Discord refusée: %r", media_url)
             return jsonify({"error": "invalid_media_url"}), 502
@@ -1188,8 +1391,8 @@ def create_app(bot=None) -> Flask:
         except urllib.error.HTTPError as exc:
             log.warning(
                 "Discord CDN refuse le média %s/%s: HTTP %s",
-                daily["channel_id"],
-                daily["message_id"],
+                channel_id,
+                message_id,
                 exc.code,
             )
             return jsonify({"error": "media_unavailable"}), 502
@@ -1253,6 +1456,7 @@ def create_app(bot=None) -> Flask:
             (database.MODE_AUTHOR, "🌞", "Qui a écrit ça ?"),
             (database.MODE_PHRASE, "✍️", "Devine la phrase"),
             (database.MODE_MEDIA, "🖼️", "Devine le média"),
+            (database.MODE_SEQUENCE, "🔀", "Remets dans l'ordre"),
         )
         mode_tabs = []
         for tab_mode, icon, label in mode_specs:
@@ -1518,7 +1722,25 @@ def create_app(bot=None) -> Flask:
         resolved_name = None
         raw_guessed_id = data.get("guessed_id")
         guess_text = (data.get("guess_text") or "").strip()
-        if difficulty == "hardcore":
+        guessed_order = []
+        if mode == database.MODE_SEQUENCE:
+            raw_order = data.get("guess_order")
+            if not isinstance(raw_order, list) or len(raw_order) != 5:
+                return jsonify({"error": "bad_sequence_order"}), 400
+            try:
+                guessed_order = [int(message_id) for message_id in raw_order]
+                correct_order = [
+                    int(message["id"]) for message in ch["sequence_messages"]
+                ]
+            except (TypeError, ValueError):
+                return jsonify({"error": "bad_sequence_order"}), 400
+            if len(set(guessed_order)) != 5 or set(guessed_order) != set(correct_order):
+                return jsonify({"error": "bad_sequence_order"}), 400
+            guessed_id = sum(
+                guessed == correct
+                for guessed, correct in zip(guessed_order, correct_order)
+            )
+        elif difficulty == "hardcore":
             # Cas normal : le joueur a SÉLECTIONNÉ un membre dans la liste → on
             # reçoit directement son id (ce qu'il voit = ce qu'il envoie).
             if raw_guessed_id not in (None, "", 0, "0"):
@@ -1581,10 +1803,22 @@ def create_app(bot=None) -> Flask:
 
         points = 2 if difficulty == "hardcore" else 1
 
-        ok = database.record_daily_attempt(
-            guild_id, today, user_id, user_name, guessed_id, is_correct,
-            time_taken_ms=time_taken_ms, mode=mode, difficulty=difficulty,
-        )
+        if mode == database.MODE_SEQUENCE:
+            ok = database.record_sequence_attempt(
+                guild_id,
+                today,
+                user_id,
+                user_name,
+                guessed_order,
+                guessed_id,
+                is_correct,
+                time_taken_ms=time_taken_ms,
+            )
+        else:
+            ok = database.record_daily_attempt(
+                guild_id, today, user_id, user_name, guessed_id, is_correct,
+                time_taken_ms=time_taken_ms, mode=mode, difficulty=difficulty,
+            )
         if not ok:
             return jsonify({"error": "already_answered"}), 409
 
@@ -1592,7 +1826,13 @@ def create_app(bot=None) -> Flask:
             guild_id, user_id, today, is_correct, mode=mode
         )
         database.record_answer(
-            guild_id, user_id, user_name, is_correct, mode=mode, points=points
+            guild_id,
+            user_id,
+            user_name,
+            is_correct,
+            mode=mode,
+            points=points,
+            earned_points=(guessed_id if mode == database.MODE_SEQUENCE else None),
         )
 
         _touch_presence(guild_id, today, user_id, mode, playing=False)
@@ -1615,6 +1855,11 @@ def create_app(bot=None) -> Flask:
             "difficulty": difficulty,
             "resolved_name": resolved_name,
             "guessed_id": str(guessed_id),
+            "correct_order": (
+                [str(message["id"]) for message in ch["sequence_messages"]]
+                if mode == database.MODE_SEQUENCE
+                else []
+            ),
             "option_avatars": option_avatars,
             "option_stats": _option_stats(guild_id, today, mode, ch["options"]),
             # Hardcore : propositions complètes pour le bouton "voir le mode Normal".
@@ -1623,7 +1868,11 @@ def create_app(bot=None) -> Flask:
                 if difficulty == "hardcore" else []
             ),
             "timed_out": timed_out,
-            "points_awarded": points if is_correct else 0,
+            "points_awarded": (
+                guessed_id
+                if mode == database.MODE_SEQUENCE
+                else points if is_correct else 0
+            ),
             "current_streak": current_streak,
             "best_streak": best_streak,
             "results": state["results"],

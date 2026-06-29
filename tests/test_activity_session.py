@@ -106,7 +106,7 @@ class ActivitySessionTests(unittest.TestCase):
         self.assertEqual(payload["m"], database.MODE_MEDIA)
         self.assertEqual(payload["x"], "activity")
 
-    def test_activity_daily_renders_all_three_internal_tabs(self):
+    def test_activity_daily_renders_all_four_internal_tabs(self):
         today = today_str()
         conn = database.get_conn()
         author_options = json.dumps([[42, "Player One"], [43, "Player Two"]])
@@ -134,6 +134,24 @@ class ActivitySessionTests(unittest.TestCase):
             "'https://example.test/media.png', ?)",
             (today, author_options),
         )
+        sequence_messages = json.dumps([
+            {
+                "id": str(message_id),
+                "author_id": "42",
+                "author_name": "Player One",
+                "content": f"Message {message_id}",
+                "has_media": False,
+                "media_url": "",
+                "media_is_video": False,
+            }
+            for message_id in range(10, 15)
+        ])
+        conn.execute(
+            "INSERT INTO sequence_daily "
+            "(guild_id, date, channel_id, first_message_id, messages) "
+            "VALUES (99, ?, 2, 10, ?)",
+            (today, sequence_messages),
+        )
         conn.commit()
         token = tokens.make_token(
             {
@@ -155,7 +173,8 @@ class ActivitySessionTests(unittest.TestCase):
         self.assertIn("Qui a écrit ça ?", html)
         self.assertIn("Devine la phrase", html)
         self.assertIn("Devine le média", html)
-        self.assertEqual(html.count('href="/.proxy/daily?t='), 3)
+        self.assertIn("Remets dans l&#39;ordre", html)
+        self.assertEqual(html.count('href="/.proxy/daily?t='), 4)
 
 
 if __name__ == "__main__":

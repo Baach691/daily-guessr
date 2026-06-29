@@ -3,7 +3,7 @@
 > État : implémenté le 29 juin 2026.
 >
 > Le site et l'Activity affichent simultanément le classement du mode courant,
-> le jeu et la progression des participants sur les trois modes.
+> le jeu et la progression des participants sur les quatre modes.
 
 ## Expérience
 
@@ -13,7 +13,7 @@ Sur grand écran, la page utilise trois zones stables :
 2. le jeu au centre ;
 3. tous les participants du daily à droite.
 
-Le panneau de droite affiche l'avatar, le nom et trois statuts :
+Le panneau de droite affiche l'avatar, le nom et quatre statuts :
 
 | Statut | Signification |
 |---|---|
@@ -22,6 +22,11 @@ Le panneau de droite affiche l'avatar, le nom et trois statuts :
 | sablier jaune | partie en cours ; |
 | `✓` gris | mode terminé, résultat encore masqué ; |
 | tiret | mode non commencé. |
+
+Pour **Remets dans l'ordre**, le résultat révélé utilise `×` pour 0/5, les chiffres
+`1` à `4` pour un ordre partiellement correct et `✓` pour 5/5. Avant que
+l'observateur ait lui-même joué ce mode, le statut reste gris et ne révèle aucun
+score.
 
 Les joueurs actifs sont placés en premier. Sur un écran plus étroit, les panneaux
 latéraux passent sous le jeu afin de conserver une largeur correcte pour les
@@ -34,8 +39,10 @@ Le payload live est construit pour chaque observateur.
 - Tant que l'observateur n'a pas terminé un mode, les résultats terminés des autres
   sont envoyés avec le statut neutre `complete`.
 - Dès qu'il termine ce même mode, les statuts deviennent `win` ou `fail`.
-- Le flux de progression ne contient jamais `guessed_id`, `correct_id`, le texte
-  d'une proposition ou le contenu de la bonne réponse.
+- Avant cette réponse, le flux ne contient jamais `guessed_id`, `correct_id`, le
+  texte d'une proposition ou le contenu de la bonne réponse.
+- Après déblocage du mode, le statut expose uniquement un libellé de guess et le
+  temps formaté. L'interface les affiche au survol ou au focus clavier.
 - Le classement détaillé et les anciennes données de résultat du mode courant
   restent verrouillés jusqu'à ce que l'observateur ait répondu.
 
@@ -68,7 +75,7 @@ GET /.proxy/daily/stream?t=<token>
 ```
 
 La clé du broker est désormais `(guild_id, date)`. Un démarrage ou une réponse dans
-n'importe lequel des trois modes réveille donc tous les viewers du daily.
+n'importe lequel des quatre modes réveille donc tous les viewers du daily.
 
 Chaque signal provoque un recalcul personnalisé :
 
@@ -89,8 +96,10 @@ Chaque signal provoque un recalcul personnalisé :
       "statuses": {
         "author": "complete",
         "phrase": "playing",
-        "media": "waiting"
+        "media": "waiting",
+        "sequence": "waiting"
       },
+      "details": {},
       "is_me": false
     }
   ]
@@ -98,7 +107,15 @@ Chaque signal provoque un recalcul personnalisé :
 ```
 
 Quand le viewer a terminé le mode courant, `unlocked` passe à `true` et les champs
-`results` et `leaderboard` sont également remplis.
+`results` et `leaderboard` sont également remplis. Pour chaque mode déjà terminé,
+`details[mode]` peut alors contenir :
+
+```json
+{
+  "guess": "Réponse choisie",
+  "time": "1.200s"
+}
+```
 
 ## Fallback
 
@@ -148,9 +165,9 @@ sans modifier les règles anti-spoil.
 - la révélation après avoir terminé le même mode ;
 - le statut « en cours » après `/daily/start` ;
 - l'expiration d'une présence devenue silencieuse ;
-- l'indépendance de l'anti-spoil pour chacun des trois modes ;
+- l'indépendance de l'anti-spoil pour chacun des quatre modes ;
 - l'absence des identifiants de réponse dans le payload protégé ;
-- la publication commune aux trois modes ;
+- la publication commune aux quatre modes ;
 - le désabonnement du flux lors de la fermeture.
 - l'état initial anti-spoil inclus dans la page avant la connexion SSE.
 

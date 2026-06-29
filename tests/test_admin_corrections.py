@@ -28,7 +28,27 @@ class AdminCorrectionTests(unittest.TestCase):
     def _seed_mode(self, mode):
         conn = database.get_conn()
         options = json.dumps([[100, "Bonne réponse"], [200, "Mauvaise réponse"]])
-        if mode == database.MODE_PHRASE:
+        if mode == database.MODE_SEQUENCE:
+            messages = json.dumps([
+                {
+                    "id": str(message_id),
+                    "author_id": "100",
+                    "author_name": "Joueur",
+                    "content": f"Message {message_id}",
+                    "has_media": False,
+                    "media_url": "",
+                    "media_is_video": False,
+                }
+                for message_id in range(1, 6)
+            ])
+            for daily_date in ("2026-06-25", "2026-06-26"):
+                conn.execute(
+                    "INSERT INTO sequence_daily "
+                    "(guild_id, date, channel_id, first_message_id, messages) "
+                    "VALUES (1, ?, 50, 1, ?)",
+                    (daily_date, messages),
+                )
+        elif mode == database.MODE_PHRASE:
             conn.execute(
                 "INSERT INTO phrase_daily "
                 "(guild_id, date, target_author_id, target_author_name, "
@@ -61,31 +81,39 @@ class AdminCorrectionTests(unittest.TestCase):
             )
 
         attempts = database._tbl(mode, "daily_attempts")
-        second_difficulty = "normal" if mode == database.MODE_PHRASE else "hardcore"
-        conn.execute(
-            f"INSERT INTO {attempts} "
-            "(guild_id, date, user_id, user_name, guessed_id, correct, answered_at, "
-            " time_taken_ms, difficulty) "
-            "VALUES (1, '2026-06-25', 10, 'Joueur', 100, 1, "
-            "'2026-06-25 12:00:00', 1000, 'normal')"
+        correct_guess = 5 if mode == database.MODE_SEQUENCE else 100
+        wrong_guess = 0 if mode == database.MODE_SEQUENCE else 200
+        second_difficulty = (
+            "hardcore"
+            if mode in (database.MODE_AUTHOR, database.MODE_MEDIA)
+            else "normal"
         )
         conn.execute(
             f"INSERT INTO {attempts} "
             "(guild_id, date, user_id, user_name, guessed_id, correct, answered_at, "
             " time_taken_ms, difficulty) "
-            "VALUES (1, '2026-06-26', 10, 'Joueur', 200, 0, "
+            "VALUES (1, '2026-06-25', 10, 'Joueur', ?, 1, "
+            "'2026-06-25 12:00:00', 1000, 'normal')",
+            (correct_guess,),
+        )
+        conn.execute(
+            f"INSERT INTO {attempts} "
+            "(guild_id, date, user_id, user_name, guessed_id, correct, answered_at, "
+            " time_taken_ms, difficulty) "
+            "VALUES (1, '2026-06-26', 10, 'Joueur', ?, 0, "
             "'2026-06-26 12:00:00', 2000, ?)",
-            (second_difficulty,),
+            (wrong_guess, second_difficulty),
         )
         conn.commit()
         database.recompute_player_stats(mode)
 
-    def test_correction_recomputes_all_three_modes(self):
+    def test_correction_recomputes_all_four_modes(self):
         for mode in database.VALID_MODES:
             with self.subTest(mode=mode):
                 self._seed_mode(mode)
+                corrected_guess = 5 if mode == database.MODE_SEQUENCE else 100
                 result = database.correct_daily_attempt(
-                    1, "2026-06-26", 10, 100, mode=mode
+                    1, "2026-06-26", 10, corrected_guess, mode=mode
                 )
 
                 self.assertIsNotNone(result)
@@ -93,7 +121,13 @@ class AdminCorrectionTests(unittest.TestCase):
                 leaderboard = database.get_leaderboard(1, mode=mode)
                 self.assertEqual(leaderboard[0]["correct"], 2)
                 self.assertEqual(leaderboard[0]["total"], 2)
-                expected_points = 2 if mode == database.MODE_PHRASE else 3
+                expected_points = (
+                    10
+                    if mode == database.MODE_SEQUENCE
+                    else 3
+                    if mode in (database.MODE_AUTHOR, database.MODE_MEDIA)
+                    else 2
+                )
                 self.assertEqual(leaderboard[0]["points"], expected_points)
                 self.assertEqual(leaderboard[0]["current_streak"], 2)
                 self.assertEqual(leaderboard[0]["best_streak"], 2)

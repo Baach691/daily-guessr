@@ -1,6 +1,6 @@
 # Daily Guessr dans Discord
 
-> État : Activity jouable avec les trois modes.
+> État : Activity jouable avec les quatre modes.
 >
 > Ce document décrit l'architecture actuellement utilisée et la procédure de
 > déploiement. Il ne contient aucun identifiant ni domaine de production.
@@ -53,7 +53,7 @@ Toutes les routes nécessaires dans l'iframe possèdent un alias `/.proxy/`.
 |---|---|
 | `POST /api/token` | échange du code OAuth2 ; |
 | `POST /api/activity/session` | création du lien daily signé ; |
-| `GET /daily` | page commune aux trois modes ; |
+| `GET /daily` | page commune aux quatre modes ; |
 | `POST /daily/start` | verrou de difficulté et départ serveur ; |
 | `POST /daily/answer` | validation de l'unique réponse ; |
 | `GET /daily/options` | propositions du mode Normal ; |
@@ -65,15 +65,23 @@ Toutes les routes nécessaires dans l'iframe possèdent un alias `/.proxy/`.
 
 ## Interface
 
-La page daily contient trois onglets internes :
+La page daily contient quatre onglets internes :
 
 - Qui a écrit ça ? ;
 - Devine la phrase ;
-- Devine le média.
+- Devine le média ;
+- Remets dans l'ordre.
 
 Sur desktop, le classement du mode courant est à gauche, le jeu au centre et le suivi
-des participants à droite. La progression live suit les trois modes et applique
+des participants à droite. La progression live suit les quatre modes et applique
 l'anti-spoil décrit dans [REALTIME_UPDATES.md](REALTIME_UPDATES.md).
+
+Le mode **Remets dans l'ordre** affiche son propre classement et attribue un point
+par position exacte, soit de 0 à 5 par daily. La victoire et la streak demandent
+toujours 5/5. Après validation, l'interface conserve l'ordre proposé avec un marqueur
+par position et affiche séparément le bon ordre. Les messages peuvent être déplacés
+par glisser-déposer ou avec les boutons haut/bas. Les pièces jointes sont servies par
+`/daily/sequence/media` après validation que leur ID appartient bien au défi signé.
 
 ### Rich Presence
 
@@ -107,9 +115,9 @@ l'auteur. Dans l'Activity, ce lien passe par
 `sdk.commands.openExternalLink()` grâce au bundle `activity-bridge.js` ; hors
 Activity, il reste un lien web classique. Le navigateur système peut ainsi prendre
 le relais lorsqu'un client Discord lit le son mais ne sait pas décoder la piste
-vidéo, sans téléchargement forcé ni transcodage serveur. Le pont tente d'abord une
-ouverture synchrone pour conserver l'autorisation liée au clic, puis le SDK ;
-Cmd/Ctrl + clic reste disponible si le client bloque malgré tout les deux méthodes.
+vidéo, sans téléchargement forcé. Le pont tente d'abord une ouverture synchrone pour
+conserver l'autorisation liée au clic, puis le SDK ; Cmd/Ctrl + clic reste disponible
+si le client bloque malgré tout les deux méthodes.
 
 ## Configuration
 
@@ -173,7 +181,7 @@ Après chaque déploiement :
 
 1. lancer `/daily` depuis Discord ;
 2. vérifier l'authentification sans écran blanc ;
-3. ouvrir les trois onglets ;
+3. ouvrir les quatre onglets ;
 4. démarrer et terminer un mode Normal ;
 5. tester le Hardcore et son timeout ;
 6. charger une image puis une vidéo ;
