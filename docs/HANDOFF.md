@@ -36,8 +36,8 @@ All tests and examples must use clearly fictional identities and identifiers.
 - [x] Three-panel responsive layout and corrected leaderboard alignment.
 - [x] Video duration added to the Hardcore media timer.
 - [x] Rich Presence artwork keys `1` and `2`.
-- [x] Media opening through the Activity SDK, the original Discord message or a
-  fresh CDN URL requested only on click, without server-side transcoding.
+- [x] Spoiler-free external media viewer through the Activity SDK, without a
+  Discord message link, forced download or server-side transcoding.
 - [x] Initial live state embedded in the page before the SSE connection.
 - [x] Persistent Play button in the daily announcement.
 - [x] `TERMS.md` and `PRIVACY.md` added.

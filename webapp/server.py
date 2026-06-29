@@ -26,7 +26,6 @@ from flask import (
     Response,
     current_app,
     jsonify,
-    redirect,
     render_template,
     request,
     send_from_directory,
@@ -1029,13 +1028,8 @@ def create_app(bot=None) -> Flask:
             media_url=(
                 f"/daily/media?t={token}" if ch.get("is_media", False) else ""
             ),
-            media_message_url=(
-                "https://discord.com/channels/"
-                f"{guild_id}/{ch['channel_id']}/{ch['message_id']}"
-                if ch.get("is_media", False) else ""
-            ),
-            media_file_url=(
-                f"{config.WEBAPP_BASE_URL.rstrip('/')}/daily/media/open?t={token}"
+            media_view_url=(
+                f"{config.WEBAPP_BASE_URL.rstrip('/')}/daily/media/view?t={token}"
                 if ch.get("is_media", False) else ""
             ),
             media_is_video=ch.get("media_is_video", False),
@@ -1082,32 +1076,41 @@ def create_app(bot=None) -> Flask:
             initial_realtime_state=initial_realtime_state,
         )
 
-    @app.route("/daily/media/open")
-    def daily_media_open():
-        """Redirige à la demande vers une URL CDN Discord fraîche."""
+    @app.route("/daily/media/view")
+    def daily_media_view():
+        """Lecteur externe sans auteur ni lien vers le message Discord."""
         token = request.args.get("t", "")
         payload = tokens.verify_token(token, config.WEBAPP_SECRET)
         if payload is None or payload.get("d") != today_str():
-            return jsonify({"error": "invalid_token"}), 403
+            return render_template(
+                "error.html",
+                title="Lien invalide",
+                message="Ce lecteur n'est plus disponible.",
+            ), 403
         if _payload_mode(payload) != database.MODE_MEDIA:
-            return jsonify({"error": "not_media_mode"}), 403
+            return render_template(
+                "error.html",
+                title="Lien invalide",
+                message="Ce lien ne correspond pas à un média.",
+            ), 403
 
         guild_id = int(payload["g"])
         daily = database.get_daily(
             guild_id, today_str(), mode=database.MODE_MEDIA
         )
         if daily is None:
-            return jsonify({"error": "no_daily"}), 404
+            return render_template(
+                "error.html",
+                title="Média indisponible",
+                message="Le média du jour est introuvable.",
+            ), 404
 
-        media_url = fetch_current_media_url(
-            current_app.config.get("BOT"),
-            daily["channel_id"],
-            daily["message_id"],
-        ) or daily["content"]
-        if not _is_discord_attachment_url(media_url):
-            return jsonify({"error": "invalid_media_url"}), 502
-
-        response = redirect(media_url, code=302)
+        response = render_template(
+            "media_view.html",
+            media_url=f"/daily/media?t={token}",
+            media_is_video=_is_video_url(daily["content"]),
+        )
+        response = current_app.make_response(response)
         response.headers["Cache-Control"] = "no-store"
         return response
 

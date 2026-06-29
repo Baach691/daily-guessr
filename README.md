@@ -12,8 +12,8 @@ classements et une interface jouable directement dans une Discord Activity.
   - **Devine le média** : retrouver l'auteur d'une image, d'un GIF ou d'une vidéo.
 - Mode Hardcore pour les modes auteur et média. Pour une vidéo, sa durée complète
   est ajoutée aux 10 secondes de réponse.
-- Média agrandissable, avec replis vers le message Discord ou le fichier frais
-  dans le navigateur externe lorsqu'un client ne sait pas décoder la vidéo.
+- Média agrandissable ou ouvrable dans un lecteur externe sans révéler le message
+  Discord ni son auteur.
 - Temps de réponse calculé côté serveur.
 - Scores, séries, classements complets et résultats du jour.
 - Contexte de conversation révélé uniquement après la réponse.

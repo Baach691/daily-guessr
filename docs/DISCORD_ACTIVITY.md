@@ -100,13 +100,13 @@ est transmise à `/daily/start`, plafonnée à dix minutes puis verrouillée en 
 le premier départ. Le timeout serveur devient donc `durée de la vidéo + délai
 Hardcore`, avec la même marge réseau que les autres modes.
 
-La page ne bloque pas son rendu pour récupérer une URL fraîche. Elle propose
-**Ouvrir dans Discord**, qui vise le message d'origine, et **Ouvrir le fichier**, dont
-la route récupère une URL CDN fraîche uniquement au clic. Dans l'Activity, ces liens
-passent par `sdk.commands.openExternalLink()` grâce au bundle
-`activity-bridge.js` ; hors Activity, ils restent des liens web classiques. Cela
-fournit une solution de secours dans le navigateur système lorsqu'un client Discord
-lit le son mais ne sait pas décoder la piste vidéo, sans transcodage serveur.
+La page propose **Ouvrir le média**, qui lance un lecteur externe ne contenant que
+l'image ou la vidéo proxifiée. Il n'affiche ni le message Discord, ni le salon, ni
+l'auteur. Dans l'Activity, ce lien passe par
+`sdk.commands.openExternalLink()` grâce au bundle `activity-bridge.js` ; hors
+Activity, il reste un lien web classique. Le navigateur système peut ainsi prendre
+le relais lorsqu'un client Discord lit le son mais ne sait pas décoder la piste
+vidéo, sans téléchargement forcé ni transcodage serveur.
 
 ## Configuration
 

@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Média du daily</title>
+  <link rel="stylesheet" href="{{ asset_url('style.css') }}">
+</head>
+<body class="media-view-page">
+  <main class="media-view">
+    {% if media_is_video %}
+      <video class="media-view-content" src="{{ media_url }}" controls autoplay playsinline preload="auto"></video>
+    {% else %}
+      <img class="media-view-content" src="{{ media_url }}" alt="Média du daily">
+    {% endif %}
+  </main>
+</body>
+</html>

@@ -1070,9 +1070,6 @@ body {
   font-weight: 750;
   text-underline-offset: 3px;
 }
-.media-direct-link.secondary {
-  color: var(--muted);
-}
 .media-direct-link[aria-busy="true"] {
   opacity: 0.55;
   pointer-events: none;
@@ -1115,6 +1112,28 @@ body.media-overlay-open {
 }
 .media-card.expanded .media-direct-link {
   color: white;
+}
+
+.media-view-page {
+  min-height: 100vh;
+  margin: 0;
+  padding: 0;
+  background: #111;
+}
+.media-view {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+}
+.media-view-content {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: min(100%, 1600px);
+  max-height: calc(100vh - 2rem);
+  object-fit: contain;
+  background: #000;
 }
 
 /* --- Onglets : s'adaptent à 3 modes (et plus) ---------------------- */

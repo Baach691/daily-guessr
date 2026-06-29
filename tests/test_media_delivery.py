@@ -117,7 +117,7 @@ class MediaDeliveryTests(unittest.TestCase):
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.get_json()["error"], "not_media_mode")
 
-    def test_media_page_has_non_blocking_fallback_links_and_expand_control(self):
+    def test_media_page_has_spoiler_free_viewer_link_and_expand_control(self):
         with (
             mock.patch.object(
                 server, "fetch_current_media_url"
@@ -129,10 +129,9 @@ class MediaDeliveryTests(unittest.TestCase):
         html = response.get_data(as_text=True)
         self.assertEqual(response.status_code, 200)
         self.assertIn('id="media-expand"', html)
-        self.assertIn("Ouvrir dans Discord", html)
-        self.assertIn("https://discord.com/channels/1/20/10", html)
-        self.assertIn("Ouvrir le fichier", html)
-        self.assertIn("/daily/media/open?t=", html)
+        self.assertIn("Ouvrir le média", html)
+        self.assertIn("/daily/media/view?t=", html)
+        self.assertNotIn("discord.com/channels/", html)
         refresh.assert_not_called()
 
     def test_activity_media_links_use_discord_sdk_bridge(self):
@@ -151,23 +150,17 @@ class MediaDeliveryTests(unittest.TestCase):
             html,
         )
 
-    def test_open_media_redirect_refreshes_url_only_when_requested(self):
-        fresh_url = (
-            "https://cdn.discordapp.com/attachments/20/11/fresh.mp4"
-            "?ex=2&is=1&hm=abc"
-        )
-        with (
-            mock.patch.object(
-                server, "fetch_current_media_url", return_value=fresh_url
-            ) as refresh,
-            self.app.test_client() as client,
-        ):
-            response = client.get(f"/daily/media/open?t={self.token}")
+    def test_media_viewer_contains_only_the_proxied_media(self):
+        with self.app.test_client() as client:
+            response = client.get(f"/daily/media/view?t={self.token}")
 
-        self.assertEqual(response.status_code, 302)
-        self.assertEqual(response.headers["Location"], fresh_url)
+        html = response.get_data(as_text=True)
+        self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers["Cache-Control"], "no-store")
-        refresh.assert_called_once_with(None, 20, 10)
+        self.assertIn("<video", html)
+        self.assertIn(f"/daily/media?t={self.token}", html)
+        self.assertNotIn("Player One", html)
+        self.assertNotIn("discord.com/channels/", html)
 
     def test_hardcore_timer_adds_and_locks_video_duration(self):
         with self.app.test_client() as client:

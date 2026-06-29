@@ -119,21 +119,13 @@
             title="Agrandir le média"
             aria-label="Agrandir le média"
             aria-pressed="false">⛶</button>
-          {% if media_message_url %}
+          {% if media_view_url %}
             <a
               class="media-direct-link"
-              href="{{ media_message_url }}"
+              href="{{ media_view_url }}"
               target="_blank"
               rel="noopener noreferrer"
-              {% if is_activity %}data-activity-external{% endif %}>Ouvrir dans Discord ↗</a>
-          {% endif %}
-          {% if media_file_url %}
-            <a
-              class="media-direct-link secondary"
-              href="{{ media_file_url }}"
-              target="_blank"
-              rel="noopener noreferrer"
-              {% if is_activity %}data-activity-external{% endif %}>Ouvrir le fichier ↗</a>
+              {% if is_activity %}data-activity-external{% endif %}>Ouvrir le média ↗</a>
           {% endif %}
         </div>
       {% else %}
