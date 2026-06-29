@@ -8,17 +8,25 @@ const sdkReady = sdk
 
 async function openOutsideActivity(link) {
   const url = new URL(link.href, window.location.href).href;
-  link.setAttribute('aria-busy', 'true');
 
+  // Une fenêtre créée pendant le clic conserve l'autorisation navigateur.
+  // Après un `await`, Discord/Chromium peut considérer l'ouverture comme une
+  // popup automatique et la bloquer.
+  const popup = window.open('about:blank', '_blank');
+  if (popup) {
+    popup.opener = null;
+    popup.location.replace(url);
+    return;
+  }
+
+  link.setAttribute('aria-busy', 'true');
   try {
     await sdkReady;
     const result = await sdk.commands.openExternalLink({ url });
     if (result?.opened) return;
     throw new Error('Discord a refusé le lien externe');
   } catch (error) {
-    console.warn('Ouverture via Discord impossible, utilisation du navigateur', error);
-    const popup = window.open(url, '_blank', 'noopener,noreferrer');
-    if (!popup) window.location.assign(url);
+    console.warn('Ouverture externe impossible', error);
   } finally {
     link.removeAttribute('aria-busy');
   }
@@ -27,6 +35,15 @@ async function openOutsideActivity(link) {
 document.addEventListener('click', (event) => {
   const link = event.target.closest('[data-activity-external]');
   if (!link) return;
+  if (
+    event.button !== 0
+    || event.metaKey
+    || event.ctrlKey
+    || event.shiftKey
+    || event.altKey
+  ) {
+    return;
+  }
   event.preventDefault();
   openOutsideActivity(link);
 });

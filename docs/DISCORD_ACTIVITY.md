@@ -106,7 +106,9 @@ l'auteur. Dans l'Activity, ce lien passe par
 `sdk.commands.openExternalLink()` grâce au bundle `activity-bridge.js` ; hors
 Activity, il reste un lien web classique. Le navigateur système peut ainsi prendre
 le relais lorsqu'un client Discord lit le son mais ne sait pas décoder la piste
-vidéo, sans téléchargement forcé ni transcodage serveur.
+vidéo, sans téléchargement forcé ni transcodage serveur. Le pont tente d'abord une
+ouverture synchrone pour conserver l'autorisation liée au clic, puis le SDK ;
+Cmd/Ctrl + clic reste disponible si le client bloque malgré tout les deux méthodes.
 
 ## Configuration
 

@@ -1074,6 +1074,11 @@ body {
   opacity: 0.55;
   pointer-events: none;
 }
+.media-open-hint {
+  margin-top: 0.45rem;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
 body.media-overlay-open {
   overflow: hidden;
 }

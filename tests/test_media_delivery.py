@@ -145,6 +145,7 @@ class MediaDeliveryTests(unittest.TestCase):
         html = response.get_data(as_text=True)
         self.assertEqual(response.status_code, 200)
         self.assertIn("data-activity-external", html)
+        self.assertIn("⌘/Ctrl + clic", html)
         self.assertIn(
             '<script type="module" src="/assets/activity-bridge.js"></script>',
             html,

@@ -128,6 +128,9 @@
               {% if is_activity %}data-activity-external{% endif %}>Ouvrir le média ↗</a>
           {% endif %}
         </div>
+        {% if is_activity and media_view_url %}
+          <p class="media-open-hint">Si le clic est bloqué : ⌘/Ctrl + clic.</p>
+        {% endif %}
       {% else %}
         <blockquote>{{ message_content }}</blockquote>
       {% endif %}
